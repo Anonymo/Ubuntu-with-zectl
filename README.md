@@ -15,18 +15,48 @@ This installer gives you:
 Boot from Ubuntu Live USB, then:
 
 ```bash
+# Install prerequisites (if not already available)
+sudo apt update
+sudo apt install -y wget curl git
+
 # Download and run
 wget https://raw.githubusercontent.com/Anonymo/Ubuntu-with-zectl/main/install.sh
 chmod +x install.sh
 sudo ./install.sh
 ```
 
+**Alternative: Clone the repository for full configuration options:**
+
+```bash
+# Install git if needed
+sudo apt update && sudo apt install -y git
+
+# Clone repository
+git clone https://github.com/Anonymo/Ubuntu-with-zectl.git
+cd Ubuntu-with-zectl
+
+# Edit configuration (optional)
+nano installer.conf
+
+# Run installer
+sudo ./install.sh
+```
+
 ## Requirements
 
-- Ubuntu 22.04, 24.04, or 25.04 Live USB
-- UEFI system
-- 8GB+ RAM
-- 20GB+ storage
+### System Requirements
+- **UEFI system** (Legacy BIOS not supported)
+- **8GB+ RAM** (4GB minimum, more recommended for desktop installs)
+- **20GB+ storage** (SSD recommended for best performance)
+- **Internet connection** (for package downloads)
+
+### Supported Ubuntu Versions
+- Ubuntu 22.04 LTS (Jammy)
+- Ubuntu 24.04 LTS (Noble) 
+- Ubuntu 24.10 (Oracular)
+
+### Live Environment
+Boot from Ubuntu Live USB/DVD. The installer handles all dependencies automatically, but you may need to install `wget` and `git` first (see Quick Install above).
 
 ## Basic Usage
 
@@ -65,8 +95,15 @@ Key settings:
 - `INSTALL_TYPE` - `server`, `desktop`, or `minimal`
 
 Advanced flags:
-- `--dry-run` prints a summary of planned actions and exits without making changes.
-- `--non-interactive` runs without prompts; requires `DISK`, `USERNAME`, and `HOSTNAME` to be set in `installer.conf`.
+- `--dry-run` - Test configuration and see what will happen without making changes
+  ```bash
+  sudo ./install.sh --dry-run
+  ```
+- `--non-interactive` - Automated install without prompts (requires config)
+  ```bash
+  # Configure installer.conf first, then:
+  sudo ./install.sh --non-interactive
+  ```
 
 ## Helper Scripts
 
@@ -106,6 +143,21 @@ zectl destroy old-environment  # Remove old ones
 ```
 
 ## Troubleshooting
+
+### Installation Issues
+
+**"version readonly variable" error:**
+- This is fixed in the latest version. Update the script:
+  ```bash
+  wget https://raw.githubusercontent.com/Anonymo/Ubuntu-with-zectl/main/install.sh
+  ```
+
+**Missing dependencies:**
+- Run: `sudo apt update && sudo apt install -y wget curl git`
+
+**UEFI not detected:**
+- Ensure you booted in UEFI mode, not Legacy/BIOS mode
+- Check BIOS settings and disable CSM/Legacy Boot
 
 ### System Won't Boot?
 
