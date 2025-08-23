@@ -220,10 +220,13 @@ cleanup_old_bes() {
     
     echo "Cleaning up boot environments older than $days days..."
     
-    # Get BE list with more reliable parsing
+    # Get BE list with machine-readable parsing (much more reliable)
     local be_list
-    if ! be_list=$(zectl list -H 2>/dev/null); then
-        error "Failed to get boot environments list"
+    if ! be_list=$(zectl list -p 2>/dev/null); then
+        log WARNING "Failed to get machine-readable BE list, falling back to regular format"
+        if ! be_list=$(zectl list -H 2>/dev/null); then
+            error "Failed to get boot environments list"
+        fi
     fi
     
     while IFS= read -r line; do

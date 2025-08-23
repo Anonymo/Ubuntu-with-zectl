@@ -546,6 +546,50 @@ detect_ubuntu_codename() {
     esac
 }
 
+mount_chroot_filesystems() {
+    log INFO "Mounting filesystems for chroot environment..."
+    
+    # Mount necessary filesystems for chroot
+    mount -t proc proc /mnt/proc || die "Failed to mount proc"
+    mount -t sysfs sys /mnt/sys || die "Failed to mount sys"
+    mount -B /dev /mnt/dev || die "Failed to mount dev"
+    mount -t devpts devpts /mnt/dev/pts || die "Failed to mount devpts"
+}
+
+configure_apt_sources() {
+    local codename="$1"
+    local mirror="$2"
+    
+    log INFO "Configuring apt sources..."
+    
+    # Configure apt sources
+    cat > /mnt/etc/apt/sources.list <<EOF
+deb ${mirror} ${codename} main restricted universe multiverse
+deb ${mirror} ${codename}-updates main restricted universe multiverse
+deb ${mirror} ${codename}-security main restricted universe multiverse
+deb ${mirror} ${codename}-backports main restricted universe multiverse
+EOF
+    
+    # Copy network configuration
+    cp /etc/resolv.conf /mnt/etc/ || log WARNING "Failed to copy resolv.conf"
+}
+
+run_debootstrap() {
+    local codename="$1"
+    local mirror="$2"
+    local all_packages="$3"
+    
+    log INFO "Running debootstrap with packages: ${all_packages}"
+    
+    debootstrap \
+        --arch=amd64 \
+        --include="${all_packages}" \
+        --components=main,restricted,universe,multiverse \
+        "${codename}" \
+        /mnt \
+        "${mirror}" || die "Failed to run debootstrap"
+}
+
 install_base_system() {
     log INFO "Installing base system..."
     
@@ -576,33 +620,10 @@ install_base_system() {
     # Combine all packages
     local all_packages="${essential_packages},${base_packages}"
     
-    # Run debootstrap
-    log INFO "Running debootstrap with packages: ${all_packages}"
-    debootstrap \
-        --arch=amd64 \
-        --include="${all_packages}" \
-        --components=main,restricted,universe,multiverse \
-        "${codename}" \
-        /mnt \
-        "${mirror}" || die "Failed to run debootstrap"
-    
-    # Configure apt sources
-    log INFO "Configuring apt sources..."
-    cat > /mnt/etc/apt/sources.list <<EOF
-deb ${mirror} ${codename} main restricted universe multiverse
-deb ${mirror} ${codename}-updates main restricted universe multiverse
-deb ${mirror} ${codename}-security main restricted universe multiverse
-deb ${mirror} ${codename}-backports main restricted universe multiverse
-EOF
-    
-    # Copy network configuration
-    cp /etc/resolv.conf /mnt/etc/ || log WARNING "Failed to copy resolv.conf"
-    
-    # Mount necessary filesystems for chroot
-    mount -t proc proc /mnt/proc || die "Failed to mount proc"
-    mount -t sysfs sys /mnt/sys || die "Failed to mount sys"
-    mount -B /dev /mnt/dev || die "Failed to mount dev"
-    mount -t devpts devpts /mnt/dev/pts || die "Failed to mount devpts"
+    # Run the modular installation steps
+    run_debootstrap "$codename" "$mirror" "$all_packages"
+    configure_apt_sources "$codename" "$mirror"
+    mount_chroot_filesystems
     
     save_state "BASE_INSTALLED" "true"
 }

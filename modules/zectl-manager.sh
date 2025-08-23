@@ -182,15 +182,25 @@ update_systemd_boot_entries() {
         return 1
     fi
     
-    # Get boot environments list first, before clearing entries
+    # Get boot environments list first, before making any changes
     local be_list
     if ! be_list=$(zectl list 2>/dev/null); then
-        log ERROR "Failed to get boot environments list. Not clearing boot entries."
+        log ERROR "Failed to get boot environments list. Not updating boot entries."
         return 1
     fi
     
-    # Only clear old entries if we successfully got the list
-    rm -f "${entries_dir}"/zectl-*.conf
+    # Create temporary directory for new entries (atomic operation)
+    local temp_dir=$(mktemp -d)
+    if [[ ! -d "$temp_dir" ]]; then
+        log ERROR "Failed to create temporary directory"
+        return 1
+    fi
+    
+    # Cleanup function for temp directory
+    cleanup_temp() {
+        rm -rf "$temp_dir"
+    }
+    trap cleanup_temp EXIT
     
     # Generate entries for each boot environment
     while IFS= read -r line; do
@@ -203,7 +213,7 @@ update_systemd_boot_entries() {
             continue  # Skip header
         fi
         
-        local entry_file="${entries_dir}/zectl-${be_name}.conf"
+        local entry_file="${temp_dir}/zectl-${be_name}.conf"
         local kernel_version=$(ls "${esp}"/vmlinuz-* 2>/dev/null | head -1 | xargs basename | sed 's/vmlinuz-//')
         
         cat > "${entry_file}" <<EOF
@@ -222,6 +232,18 @@ EOF
             echo "editor no" >> "${loader_dir}/loader.conf"
         fi
     done <<< "$be_list"
+    
+    # Atomic operation: only now remove old entries and move new ones
+    log INFO "Atomically updating boot entries..."
+    rm -f "${entries_dir}"/zectl-*.conf
+    
+    # Move all new entries at once
+    if ! mv "${temp_dir}"/zectl-*.conf "${entries_dir}/" 2>/dev/null; then
+        log ERROR "Failed to move new boot entries to final location"
+        return 1
+    fi
+    
+    log SUCCESS "Boot entries updated successfully"
 }
 
 #############################################################
