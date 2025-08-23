@@ -1,274 +1,164 @@
-# Ubuntu with zectl - ZFS Boot Environment Management
+# Ubuntu with zectl
 
-A modern, streamlined installer for Ubuntu with ZFS root filesystem and boot environment management using `zectl` and `systemd-boot`.
+ZFS boot environment management for Ubuntu - never break your system again!
 
-## Features
+## What is this?
 
-- **ZFS Root Filesystem**: Full system installed on ZFS with optimal settings
-- **Boot Environments**: Manage multiple bootable system states with `zectl`
-- **Automatic Snapshots**: Automated snapshots before system updates
-- **Easy Rollback**: Quickly revert to previous system states
-- **systemd-boot Integration**: Modern UEFI boot management
-- **Encryption Support**: Optional native ZFS encryption
-- **Multiple Installation Types**: Server, Desktop, or Custom configurations
+This installer gives you:
+- **Boot Environments** - Multiple versions of your system you can switch between
+- **Automatic Snapshots** - Backup before every update
+- **Easy Rollback** - Boot into a previous working state if something breaks
+- **ZFS Benefits** - Compression, checksums, and data integrity
+
+## Quick Install
+
+Boot from Ubuntu Live USB, then:
+
+```bash
+# Download and run
+wget https://raw.githubusercontent.com/Anonymo/Ubuntu-with-zectl/main/install.sh
+chmod +x install.sh
+sudo ./install.sh
+```
 
 ## Requirements
 
-- Ubuntu 22.04, 24.04, or 25.04 installation media (Live USB/DVD)
-- UEFI-capable system
-- Minimum 8GB RAM (16GB recommended for desktop)
-- Minimum 20GB storage (50GB+ recommended)
-- Internet connection during installation
+- Ubuntu 22.04, 24.04, or 25.04 Live USB
+- UEFI system
+- 8GB+ RAM
+- 20GB+ storage
 
-## Quick Start
+## Basic Usage
 
-1. Boot from Ubuntu Live media
-2. Open a terminal and run:
+After installation, manage your system with these commands:
 
 ```bash
-# Download the installer
-wget https://raw.githubusercontent.com/Anonymo/Ubuntu-with-zectl/main/install.sh
-chmod +x install.sh
-
-# Run the installer
-sudo ./install.sh
-```
-
-3. Follow the interactive prompts to configure your system
-
-## Installation Options
-
-### Interactive Mode (Recommended)
-```bash
-sudo ./install.sh
-```
-The installer will guide you through all configuration options.
-
-### Automated Mode
-Create a configuration file first:
-```bash
-cat > installer.conf <<EOF
-INSTALL_TYPE="server"
-DISK="/dev/sda"
-POOL_NAME="rpool"
-ENCRYPTION="on"
-USERNAME="myuser"
-HOSTNAME="myserver"
-TIMEZONE="America/New_York"
-EOF
-
-sudo ./install.sh --config installer.conf
-```
-
-### Resume Interrupted Installation
-```bash
-sudo ./install.sh --resume
-```
-
-## Boot Environment Management
-
-After installation, you can manage boot environments using `zectl`:
-
-### List Boot Environments
-```bash
+# List boot environments
 zectl list
-```
 
-### Create a New Boot Environment
-```bash
-# Create BE before major updates
+# Create backup before updates
 zectl create pre-update
-
-# Create BE with description
-zectl create -d "Before kernel upgrade" kernel-update
-```
-
-### Activate a Boot Environment
-```bash
-zectl activate previous-be
-# Reboot to use the activated BE
-```
-
-### Delete a Boot Environment
-```bash
-zectl destroy old-be
-```
-
-### Create and Manage Snapshots
-```bash
-# Snapshot current BE
-zectl snapshot
-
-# Snapshot specific BE
-zectl snapshot myenv@before-changes
-
-# Rollback to snapshot
-zectl rollback myenv@before-changes
-```
-
-## System Layout
-
-### ZFS Dataset Structure
-```
-rpool                       # Root pool
-├── ROOT                    # Container for boot environments
-│   └── ubuntu             # Default boot environment
-├── home                   # User home directories
-└── var                    # System state
-    ├── lib                # Variable libraries
-    ├── log                # System logs
-    ├── cache              # Application caches
-    └── tmp                # Temporary files
-```
-
-### Boot Configuration
-- **Bootloader**: systemd-boot (UEFI)
-- **ESP Mount**: `/boot/efi`
-- **Boot Entries**: Automatically managed by zectl
-
-## Advanced Features
-
-### Automatic Snapshots
-
-The system automatically creates snapshots:
-- Daily snapshots (kept for 10 days)
-- Pre/post package installation snapshots
-- Manual snapshots via `zectl snapshot`
-
-### APT Integration
-
-Snapshots are automatically created before package operations:
-```bash
-# Automatic snapshot before upgrade
 apt upgrade
-# If something breaks, rollback:
-zectl activate <previous-be>
+
+# Something broke? Rollback!
+zectl activate pre-update
+reboot
 ```
 
-### Recovery Environment
+## Configuration
 
-Create a dedicated recovery environment:
+Edit `installer.conf` before running the installer to customize your installation:
+
 ```bash
-zectl create recovery
-zectl mount recovery /mnt
-# Install recovery tools in /mnt
-zectl umount recovery
+# Edit the configuration
+nano installer.conf
+
+# Run with your settings
+sudo ./install.sh
+```
+
+Key settings:
+- `DISK` - Target drive (e.g., `/dev/sda` or `/dev/nvme0n1`)
+- `USERNAME` - Your login name
+- `HOSTNAME` - Computer name
+- `ENCRYPTION` - Enable disk encryption (`on` or `off`)
+- `INSTALL_TYPE` - `server`, `desktop`, or `minimal`
+
+## Helper Scripts
+
+We include a helper script for common tasks:
+
+```bash
+# System upgrade with automatic backup
+./scripts/zectl-helper.sh upgrade
+
+# Quick rollback to previous state
+./scripts/zectl-helper.sh rollback
+
+# Check system status
+./scripts/zectl-helper.sh status
+```
+
+## Common Tasks
+
+### Before Major Updates
+```bash
+zectl create pre-update
+apt upgrade
+# If it breaks: zectl activate pre-update && reboot
+```
+
+### Regular Backups
+```bash
+# Automatic daily snapshots are enabled by default
+# Manual snapshot:
+zectl snapshot
+```
+
+### Clean Up Old Environments
+```bash
+zectl list                    # See what you have
+zectl destroy old-environment  # Remove old ones
 ```
 
 ## Troubleshooting
 
-### Boot Issues
+### System Won't Boot?
 
-1. **System won't boot after update**:
-   - Reboot and select previous BE from boot menu
-   - Make previous BE permanent: `zectl activate working-be`
-
-2. **Missing boot entries**:
+1. Reboot and select an older environment from the boot menu
+2. Once booted, make it permanent:
    ```bash
-   # Regenerate systemd-boot entries
-   bootctl update
+   zectl activate working-environment
    ```
 
-3. **ZFS modules not loading**:
-   ```bash
-   # In recovery/live environment
-   zpool import -f rpool
-   zfs mount rpool/ROOT/ubuntu
-   # Chroot and rebuild initramfs
-   ```
+### Need to Access Your Data from Live USB?
 
-### ZFS Pool Issues
-
-1. **Import pool in live environment**:
-   ```bash
-   zpool import -f -R /mnt rpool
-   ```
-
-2. **Check pool status**:
-   ```bash
-   zpool status rpool
-   ```
-
-3. **Repair filesystem**:
-   ```bash
-   zpool scrub rpool
-   ```
-
-## Configuration Files
-
-### Main Configuration
-- `/etc/zectl.conf` - zectl configuration
-- `/boot/efi/loader/loader.conf` - systemd-boot configuration
-
-### Dataset Properties
-View current dataset properties:
 ```bash
-zfs get all rpool/ROOT/ubuntu
+# Import your pool
+zpool import -f rpool
+
+# Mount it
+zfs mount rpool/ROOT/ubuntu
+
+# Your files are in /mnt
 ```
 
-## Performance Tuning
+## Project Structure
 
-### ZFS Tuning
-```bash
-# Set ARC max (example: 8GB)
-echo "options zfs zfs_arc_max=8589934592" >> /etc/modprobe.d/zfs.conf
-
-# Enable TRIM for SSDs
-zpool set autotrim=on rpool
+```
+.
+├── install.sh                 # Main installer
+├── installer.conf             # Configuration (edit this!)
+├── README.md                  # This file
+├── modules/
+│   └── zectl-manager.sh      # Boot environment functions
+├── scripts/
+│   └── zectl-helper.sh       # Convenience commands
+└── config/
+    └── installer.conf.example # Example configuration
 ```
 
-### Compression
-All datasets use LZ4 compression by default. To change:
-```bash
-zfs set compression=zstd rpool/home
-```
+## Advanced Topics
 
-## Backup and Restore
+See the [Wiki](https://github.com/Anonymo/Ubuntu-with-zectl/wiki) for:
+- Encryption setup
+- Remote backups
+- Performance tuning
+- Custom configurations
 
-### Send/Receive Backups
-```bash
-# Backup BE to file
-zfs send rpool/ROOT/ubuntu@snapshot | gzip > backup.zfs.gz
+## ⚠️ Warning
 
-# Restore from backup
-gunzip -c backup.zfs.gz | zfs receive rpool/ROOT/restored
-```
-
-### Remote Backups
-```bash
-# Send to remote system
-zfs send rpool/ROOT/ubuntu@snapshot | ssh remote "zfs receive tank/backups/ubuntu"
-```
-
-## Security Considerations
-
-- Encryption keys are stored in the initramfs (if encryption enabled)
-- Regular snapshots protect against ransomware
-- Boot environments isolate system changes
-- systemd-boot secure boot compatible
-
-## Contributing
-
-Contributions are welcome! Please:
-1. Fork the repository
-2. Create a feature branch
-3. Submit a pull request
+This installer will **ERASE** the target disk. Backup your data first!
 
 ## Support
 
-- **Issues**: [GitHub Issues](https://github.com/Anonymo/Ubuntu-with-zectl/issues)
-- **Documentation**: [Wiki](https://github.com/Anonymo/Ubuntu-with-zectl/wiki)
+- [Report Issues](https://github.com/Anonymo/Ubuntu-with-zectl/issues)
+- [Documentation Wiki](https://github.com/Anonymo/Ubuntu-with-zectl/wiki)
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+MIT License - See LICENSE file
 
-## Credits
+---
 
-- [zectl](https://github.com/johnramsden/zectl) - ZFS Boot Environment manager
-- Ubuntu ZFS community
-- systemd-boot developers
-
-## Disclaimer
-
-This installer modifies system partitions and can result in data loss. Always backup important data before proceeding. Use at your own risk.
+*Never fear updates again with ZFS boot environments!*

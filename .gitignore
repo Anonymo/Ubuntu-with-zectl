@@ -1,5 +1,5 @@
-# Configuration files
-config/installer.conf
+# Configuration files (keep example files)
+# installer.conf is included by default
 
 # Temporary files
 *.tmp
