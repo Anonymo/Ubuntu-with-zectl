@@ -207,8 +207,14 @@ detect_ubuntu_version() {
 save_state() {
     local key="$1"
     local value="$2"
-    
-    echo "${key}=${value}" >> "${STATE_FILE}"
+    # Replace existing key or append if missing to avoid unbounded growth
+    if [[ -f "${STATE_FILE}" ]] && grep -q "^${key}=" "${STATE_FILE}"; then
+        local tmp
+        tmp="$(mktemp)"
+        awk -v k="${key}" -v v="${value}" 'BEGIN{FS=OFS="="} $1==k {$2=v; print; next} {print}' "${STATE_FILE}" >"${tmp}" && mv "${tmp}" "${STATE_FILE}"
+    else
+        echo "${key}=${value}" >> "${STATE_FILE}"
+    fi
 }
 
 load_state() {
@@ -612,6 +618,15 @@ create_zfs_pool() {
     mkdir -p /mnt/boot/efi || die "Failed to create boot/efi directory"
     mount "${EFI_PARTITION}" /mnt/boot/efi || die "Failed to mount EFI partition"
     
+    # Ensure ZFS cachefile is present in target for reliable imports at boot
+    mkdir -p /etc/zfs /mnt/etc/zfs
+    if ! zpool set cachefile=/etc/zfs/zpool.cache "${POOL_NAME}" 2>/dev/null; then
+        log WARNING "Failed to set ZFS cachefile property; relying on initramfs auto import"
+    fi
+    if [[ -f /etc/zfs/zpool.cache ]]; then
+        cp /etc/zfs/zpool.cache /mnt/etc/zfs/zpool.cache 2>/dev/null || log WARNING "Failed to copy zpool.cache to target"
+    fi
+    
     save_state "ZFS_CREATED" "true"
 }
 
@@ -749,7 +764,7 @@ configure_system() {
     cat > /mnt/etc/fstab <<EOF
 # /etc/fstab: static file system information.
 # ZFS filesystems are mounted by ZFS, not fstab
-UUID=$(blkid -s UUID -o value "${EFI_PARTITION}") /boot/efi vfat defaults 0 1
+UUID=$(blkid -s UUID -o value "${EFI_PARTITION}") /boot/efi vfat umask=0077 0 1
 EOF
 
     # Add swap if configured
@@ -917,7 +932,7 @@ apt-get install -y ca-certificates
 # Update initramfs
 # Set up automatic kernel syncing to ESP
 cat > /etc/apt/apt.conf.d/99-sync-kernels-to-esp <<'HOOK'
-# Automatically sync kernel and initrd to ESP after apt operations
+// Automatically sync kernel and initrd to ESP after apt operations
 DPkg::Post-Invoke {
     "if [ -d /boot/efi ] && [ -x /usr/local/bin/sync-kernels-to-esp ]; then /usr/local/bin/sync-kernels-to-esp; fi";
 };
@@ -989,11 +1004,23 @@ update-initramfs -c -k all
 # Run initial kernel sync
 /usr/local/bin/sync-kernels-to-esp || true
 
+# Optional: run post-install script if provided
+if [[ -x /tmp/post-install.sh ]]; then
+    echo "Running post-install script..."
+    /tmp/post-install.sh || echo "Post-install script exited with non-zero status"
+fi
+
 echo "Finalization complete"
 SCRIPT
     
     chmod +x /mnt/tmp/finalize.sh
     
+    # Optionally copy post-install script into chroot
+    if [[ -n "${POST_INSTALL_SCRIPT:-}" ]] && [[ -f "${POST_INSTALL_SCRIPT}" ]]; then
+        cp "${POST_INSTALL_SCRIPT}" /mnt/tmp/post-install.sh || log WARNING "Failed to copy post-install script"
+        chroot /mnt chmod +x /tmp/post-install.sh || true
+    fi
+
     # Set variables in chroot environment
     export USERNAME USER_PASSWORD ROOT_PASSWORD
     chroot /mnt /bin/bash -c "USERNAME='${USERNAME}' USER_PASSWORD='${USER_PASSWORD}' ROOT_PASSWORD='${ROOT_PASSWORD}' /tmp/finalize.sh" || die "Failed to finalize installation"
@@ -1079,9 +1106,11 @@ main() {
     load_config
     load_state
     
-    # Interactive configuration if needed
-    if [[ -z "${DISK}" ]] || [[ -z "${USERNAME}" ]]; then
-        interactive_config
+    # Interactive configuration if needed (skip if non-interactive)
+    if [[ "$NON_INTERACTIVE" != true ]]; then
+        if [[ -z "${DISK}" ]] || [[ -z "${USERNAME}" ]]; then
+            interactive_config
+        fi
     fi
     
     # Installation steps
@@ -1142,4 +1171,41 @@ case "${1:-}" in
 esac
 
 # Run main installation
+# Additional CLI flags
+NON_INTERACTIVE=false
+DRY_RUN=false
+
+for arg in "$@"; do
+    case "$arg" in
+        --non-interactive)
+            NON_INTERACTIVE=true
+            ;;
+        --dry-run)
+            DRY_RUN=true
+            ;;
+    esac
+done
+
+# Non-interactive mode validation
+if [[ "$NON_INTERACTIVE" == true ]]; then
+    if [[ -z "${DISK}" || -z "${USERNAME}" || -z "${HOSTNAME}" ]]; then
+        echo "Missing required config (DISK, USERNAME, HOSTNAME) for --non-interactive"
+        exit 1
+    fi
+fi
+
+if [[ "$DRY_RUN" == true ]]; then
+    echo "Dry run: no changes will be made"
+    echo "Configuration Summary:"
+    echo "  Disk: ${DISK:-<unset>}"
+    echo "  Pool: ${POOL_NAME}"
+    echo "  Swap: ${SWAP_SIZE}"
+    echo "  Encryption: ${ENCRYPTION}"
+    echo "  User: ${USERNAME:-<unset>}"
+    echo "  Hostname: ${HOSTNAME:-<unset>}"
+    echo "  Timezone: ${TIMEZONE}"
+    echo "Planned steps: prepare_disk, create_zfs_pool, install_base_system, configure_system, install_zectl, install_systemd_boot, finalize_installation"
+    exit 0
+fi
+
 main "$@"
