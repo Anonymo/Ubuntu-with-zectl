@@ -672,11 +672,11 @@ configure_apt_sources() {
     
     log INFO "Configuring apt sources..."
     
-    # Configure apt sources
+    # Configure apt sources with dedicated security mirror
     cat > /mnt/etc/apt/sources.list <<EOF
 deb ${mirror} ${codename} main restricted universe multiverse
 deb ${mirror} ${codename}-updates main restricted universe multiverse
-deb ${mirror} ${codename}-security main restricted universe multiverse
+deb http://security.ubuntu.com/ubuntu ${codename}-security main restricted universe multiverse
 deb ${mirror} ${codename}-backports main restricted universe multiverse
 EOF
     
@@ -722,55 +722,175 @@ run_debootstrap() {
         "${mirror}" || die "Failed to run debootstrap"
 }
 
-detect_best_mirror() {
-    # Try to detect an optimized mirror from the live environment
-    if [[ -n "${UBUNTU_MIRROR}" ]]; then
-        echo "${UBUNTU_MIRROR}"
+detect_live_mirror() {
+    local live_mirror=""
+    
+    # Scan /etc/apt/sources.list and /etc/apt/sources.list.d/*.list
+    local sources_files=("/etc/apt/sources.list")
+    if [[ -d /etc/apt/sources.list.d ]]; then
+        while IFS= read -r -d '' file; do
+            sources_files+=("$file")
+        done < <(find /etc/apt/sources.list.d -name "*.list" -print0 2>/dev/null)
+    fi
+    
+    for file in "${sources_files[@]}"; do
+        if [[ -f "$file" ]]; then
+            # Get first non-security, non-cdrom mirror
+            live_mirror=$(grep "^deb " "$file" | grep -v "security.ubuntu.com" | grep -v "deb cdrom:" | head -1 | awk '{print $2}')
+            if [[ -n "$live_mirror" ]] && [[ "$live_mirror" != *"archive.ubuntu.com"* ]]; then
+                log INFO "Detected optimized mirror from live environment: $live_mirror"
+                echo "$live_mirror"
+                return
+            fi
+        fi
+    done
+}
+
+validate_mirror() {
+    local mirror="$1"
+    local codename="$2"
+    
+    if ! command -v curl &> /dev/null; then
+        return 0  # Can't validate without curl, assume it works
+    fi
+    
+    # Check if mirror is reachable with Release file validation
+    if curl -s --head --connect-timeout 3 --max-time 5 "$mirror/dists/$codename/Release" >/dev/null 2>&1; then
+        return 0
+    else
+        log WARNING "Mirror $mirror appears unreachable or lacks $codename"
+        return 1
+    fi
+}
+
+prefer_https() {
+    local mirror="$1"
+    local codename="$2"
+    
+    # If already HTTPS, return as-is
+    if [[ "$mirror" == https://* ]]; then
+        echo "$mirror"
         return
     fi
     
-    # Check if we're on a Live ISO with pre-configured sources
-    if [[ -f /etc/apt/sources.list ]]; then
-        local live_mirror=$(grep -m1 "^deb " /etc/apt/sources.list | awk '{print $2}')
-        if [[ -n "$live_mirror" ]] && [[ "$live_mirror" != *"archive.ubuntu.com"* ]]; then
-            log INFO "Detected optimized mirror from live environment: $live_mirror"
+    # Try HTTPS version
+    local https_mirror="${mirror/http:/https:}"
+    
+    if command -v curl &> /dev/null; then
+        if [[ -n "$codename" ]]; then
+            # Validate HTTPS with codename
+            if curl -s --head --connect-timeout 3 --max-time 5 "$https_mirror/dists/$codename/Release" >/dev/null 2>&1; then
+                log INFO "Using HTTPS mirror: $https_mirror"
+                echo "$https_mirror"
+                return
+            fi
+        else
+            # Simple HTTPS connectivity test
+            if curl -s --head --connect-timeout 3 --max-time 5 "$https_mirror" >/dev/null 2>&1; then
+                log INFO "Using HTTPS mirror: $https_mirror"
+                echo "$https_mirror"
+                return
+            fi
+        fi
+    fi
+    
+    # Fall back to HTTP
+    echo "$mirror"
+}
+
+get_architecture_base_url() {
+    local arch=$(detect_architecture)
+    local country_code="$1"
+    
+    case "$arch" in
+        amd64)
+            # Standard archive for x86_64
+            case "${country_code,,}" in
+                us) echo "http://us.archive.ubuntu.com/ubuntu" ;;
+                gb|uk) echo "http://gb.archive.ubuntu.com/ubuntu" ;;
+                ca) echo "http://ca.archive.ubuntu.com/ubuntu" ;;
+                de) echo "http://de.archive.ubuntu.com/ubuntu" ;;
+                fr) echo "http://fr.archive.ubuntu.com/ubuntu" ;;
+                au) echo "http://au.archive.ubuntu.com/ubuntu" ;;
+                jp) echo "http://jp.archive.ubuntu.com/ubuntu" ;;
+                kr) echo "http://kr.archive.ubuntu.com/ubuntu" ;;
+                cn) echo "http://cn.archive.ubuntu.com/ubuntu" ;;
+                in) echo "http://in.archive.ubuntu.com/ubuntu" ;;
+                br) echo "http://br.archive.ubuntu.com/ubuntu" ;;
+                *) echo "http://archive.ubuntu.com/ubuntu" ;;
+            esac
+            ;;
+        arm64|armhf)
+            # Use ports archive for ARM architectures
+            log INFO "Using ports archive for $arch architecture"
+            echo "http://ports.ubuntu.com/ubuntu-ports"
+            ;;
+        *)
+            # Default to ports for unknown architectures
+            log WARNING "Unknown architecture $arch, using ports archive"
+            echo "http://ports.ubuntu.com/ubuntu-ports"
+            ;;
+    esac
+}
+
+detect_best_mirror() {
+    local codename="${1:-}"
+    
+    # 1. Prefer user-defined mirror
+    if [[ -n "${UBUNTU_MIRROR}" ]]; then
+        if [[ -n "$codename" ]] && ! validate_mirror "${UBUNTU_MIRROR}" "$codename"; then
+            log WARNING "User-specified mirror failed validation, falling back to auto-detection"
+        else
+            local user_mirror=$(prefer_https "${UBUNTU_MIRROR}" "$codename")
+            echo "$user_mirror"
+            return
+        fi
+    fi
+    
+    # 2. Try to reuse live environment mirror
+    local live_mirror=$(detect_live_mirror)
+    if [[ -n "$live_mirror" ]]; then
+        if [[ -z "$codename" ]] || validate_mirror "$live_mirror" "$codename"; then
+            live_mirror=$(prefer_https "$live_mirror" "$codename")
             echo "$live_mirror"
             return
         fi
     fi
     
-    # Try to detect country-specific mirror
+    # 3. Geo-IP detection with architecture awareness
     # Note: This is a best-effort attempt via a public geo-IP service
     # and may not be accurate if using a VPN or proxy
     local country_code=""
     if command -v curl &> /dev/null; then
-        country_code=$(curl -s --connect-timeout 5 http://ipinfo.io/country 2>/dev/null || true)
+        country_code=$(curl -s --connect-timeout 3 --max-time 5 http://ipinfo.io/country 2>/dev/null || true)
     fi
     
-    case "${country_code,,}" in
-        us) echo "http://us.archive.ubuntu.com/ubuntu" ;;
-        gb|uk) echo "http://gb.archive.ubuntu.com/ubuntu" ;;
-        ca) echo "http://ca.archive.ubuntu.com/ubuntu" ;;
-        de) echo "http://de.archive.ubuntu.com/ubuntu" ;;
-        fr) echo "http://fr.archive.ubuntu.com/ubuntu" ;;
-        au) echo "http://au.archive.ubuntu.com/ubuntu" ;;
-        jp) echo "http://jp.archive.ubuntu.com/ubuntu" ;;
-        kr) echo "http://kr.archive.ubuntu.com/ubuntu" ;;
-        cn) echo "http://cn.archive.ubuntu.com/ubuntu" ;;
-        in) echo "http://in.archive.ubuntu.com/ubuntu" ;;
-        br) echo "http://br.archive.ubuntu.com/ubuntu" ;;
-        *)  
-            log INFO "Using default archive (country: ${country_code:-unknown})"
-            echo "http://archive.ubuntu.com/ubuntu" 
-            ;;
-    esac
+    local geo_mirror=$(get_architecture_base_url "$country_code")
+    
+    # 4. Validate geo-detected mirror
+    if [[ -n "$codename" ]] && ! validate_mirror "$geo_mirror" "$codename"; then
+        log WARNING "Geo-detected mirror failed validation, using default"
+        # Final fallback
+        local arch=$(detect_architecture)
+        case "$arch" in
+            amd64) geo_mirror="http://archive.ubuntu.com/ubuntu" ;;
+            *) geo_mirror="http://ports.ubuntu.com/ubuntu-ports" ;;
+        esac
+    fi
+    
+    log INFO "Selected mirror: $geo_mirror (country: ${country_code:-unknown})"
+    
+    # 5. Try to prefer HTTPS if available
+    geo_mirror=$(prefer_https "$geo_mirror" "$codename")
+    
+    echo "$geo_mirror"
 }
 
 install_base_system() {
     log INFO "Installing base system..."
     
     local codename=$(detect_ubuntu_codename)
-    local mirror=$(detect_best_mirror)
+    local mirror=$(detect_best_mirror "$codename")
     
     log INFO "Using Ubuntu ${UBUNTU_VERSION} (${codename}) from ${mirror}"
     
