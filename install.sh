@@ -10,6 +10,7 @@
 set -euo pipefail
 
 # Script metadata
+# This installer creates a Ubuntu system with ZFS root and boot environment management
 readonly VERSION="2.0.0"
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly MODULES_DIR="${SCRIPT_DIR}/modules"
@@ -105,13 +106,42 @@ check_root() {
 check_dependencies() {
     log INFO "Checking and installing dependencies..."
     
-    # Update package cache
-    apt-get update || die "Failed to update package cache"
+    # Ensure we have a working package manager
+    if ! command -v apt-get &> /dev/null; then
+        die "apt-get not found. This installer requires Ubuntu or Debian."
+    fi
     
-    # Install required packages
+    # Update package cache with retry logic
+    local retries=3
+    while [[ $retries -gt 0 ]]; do
+        if apt-get update; then
+            break
+        else
+            retries=$((retries - 1))
+            if [[ $retries -eq 0 ]]; then
+                die "Failed to update package cache after multiple attempts"
+            fi
+            log WARNING "Package update failed, retrying in 5 seconds... ($retries attempts left)"
+            sleep 5
+        fi
+    done
+    
+    # Install required packages with better error handling
     local packages=("debootstrap" "gdisk" "zfsutils-linux" "efibootmgr" "arch-install-scripts" "dosfstools")
     
-    apt-get install -y "${packages[@]}" || die "Failed to install dependencies"
+    log INFO "Installing packages: ${packages[*]}"
+    if ! apt-get install -y "${packages[@]}"; then
+        log ERROR "Failed to install some packages. Checking which ones are missing..."
+        local missing=()
+        for pkg in "${packages[@]}"; do
+            if ! dpkg -l "$pkg" &>/dev/null; then
+                missing+=("$pkg")
+            fi
+        done
+        if [[ ${#missing[@]} -gt 0 ]]; then
+            die "Missing critical packages: ${missing[*]}. Please install them manually and retry."
+        fi
+    fi
     
     # Load ZFS module if not loaded
     if ! lsmod | grep -q zfs; then
@@ -121,8 +151,12 @@ check_dependencies() {
     # Check if we're in a live environment
     if [[ ! -f /etc/apt/sources.list ]] || ! grep -q "universe" /etc/apt/sources.list; then
         log WARNING "Adding universe repository..."
-        add-apt-repository universe -y || true
-        apt-get update || true
+        add-apt-repository universe -y 2>/dev/null || {
+            log WARNING "Failed to add universe repository, continuing anyway"
+        }
+        apt-get update 2>/dev/null || {
+            log WARNING "Failed to update package cache after adding universe"
+        }
     fi
 }
 
@@ -164,22 +198,63 @@ load_config() {
     fi
 }
 
+validate_username() {
+    local username="$1"
+    if [[ -z "$username" ]]; then
+        return 1
+    fi
+    # Check valid username format (alphanumeric, underscore, dash, 3-32 chars)
+    if [[ "$username" =~ ^[a-z][-a-z0-9_]{2,31}$ ]]; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+validate_hostname() {
+    local hostname="$1"
+    if [[ -z "$hostname" ]]; then
+        return 1
+    fi
+    # Check valid hostname format
+    if [[ "$hostname" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$ ]] && [[ ${#hostname} -le 63 ]]; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+validate_timezone() {
+    local timezone="$1"
+    if [[ -z "$timezone" ]]; then
+        return 1
+    fi
+    # Check if timezone file exists
+    if [[ -f "/usr/share/zoneinfo/$timezone" ]]; then
+        return 0
+    else
+        return 1
+    fi
+}
+
 interactive_config() {
     log INFO "Starting interactive configuration..."
     
-    # Select installation type
-    echo "Select installation type:"
-    echo "1) Server (minimal)"
-    echo "2) Desktop (with GUI)"
-    echo "3) Custom"
-    read -rp "Choice [1-3]: " choice
-    
-    case "${choice}" in
-        1) INSTALL_TYPE="server" ;;
-        2) INSTALL_TYPE="desktop" ;;
-        3) INSTALL_TYPE="custom" ;;
-        *) INSTALL_TYPE="server" ;;
-    esac
+    # Select installation type with validation
+    while true; do
+        echo "Select installation type:"
+        echo "1) Server (minimal)"
+        echo "2) Desktop (with GUI)"
+        echo "3) Minimal (basic system only)"
+        read -rp "Choice [1-3]: " choice
+        
+        case "${choice}" in
+            1) INSTALL_TYPE="server"; break ;;
+            2) INSTALL_TYPE="desktop"; break ;;
+            3) INSTALL_TYPE="minimal"; break ;;
+            *) echo "Invalid choice. Please select 1, 2, or 3." ;;
+        esac
+    done
     
     # Select disk
     echo -e "\nAvailable disks:"
@@ -232,13 +307,37 @@ interactive_config() {
         ENCRYPTION="off"
     fi
     
-    # User configuration
-    read -rp "Enter username for the new system: " USERNAME
-    read -rp "Enter hostname: " HOSTNAME
+    # User configuration with validation
+    while true; do
+        read -rp "Enter username for the new system: " USERNAME
+        if validate_username "$USERNAME"; then
+            break
+        else
+            echo "Invalid username. Must start with a letter, be 3-32 characters, and contain only lowercase letters, numbers, hyphens, and underscores."
+        fi
+    done
     
-    # Timezone
-    read -rp "Enter timezone [${TIMEZONE}]: " input
-    TIMEZONE="${input:-${TIMEZONE}}"
+    while true; do
+        read -rp "Enter hostname: " HOSTNAME
+        if validate_hostname "$HOSTNAME"; then
+            break
+        else
+            echo "Invalid hostname. Must be 1-63 characters, start and end with alphanumeric, and contain only letters, numbers, and hyphens."
+        fi
+    done
+    
+    # Timezone with validation
+    while true; do
+        read -rp "Enter timezone [${TIMEZONE}]: " input
+        local tz="${input:-${TIMEZONE}}"
+        if validate_timezone "$tz"; then
+            TIMEZONE="$tz"
+            break
+        else
+            echo "Invalid timezone. Examples: America/New_York, Europe/London, Asia/Tokyo"
+            echo "Run 'timedatectl list-timezones' to see all available timezones."
+        fi
+    done
     
     # Summary
     echo -e "\n${GREEN}Configuration Summary:${NC}"
@@ -262,23 +361,46 @@ get_partition_name() {
     local disk="$1"
     local partition_num="$2"
     
-    # Handle NVMe drives (nvme0n1p1) vs SATA drives (sda1)
-    if [[ "$disk" =~ nvme[0-9]+n[0-9]+$ ]] || [[ "$disk" =~ mmcblk[0-9]+$ ]]; then
+    # More robust partition naming detection
+    # Handle various disk types: NVMe, eMMC, loop devices, etc.
+    if [[ "$disk" =~ (nvme[0-9]+n[0-9]+|mmcblk[0-9]+|loop[0-9]+)$ ]]; then
         echo "${disk}p${partition_num}"
-    else
+    elif [[ "$disk" =~ (sd[a-z]+|hd[a-z]+|vd[a-z]+|xvd[a-z]+)$ ]]; then
         echo "${disk}${partition_num}"
+    else
+        # Fallback: try both formats and use the one that exists
+        local p_format="${disk}p${partition_num}"
+        local direct_format="${disk}${partition_num}"
+        
+        if [[ -b "$p_format" ]]; then
+            echo "$p_format"
+        elif [[ -b "$direct_format" ]]; then
+            echo "$direct_format"
+        else
+            # Default to p format for unknown types
+            echo "$p_format"
+        fi
     fi
 }
 
 prepare_disk() {
     log INFO "Preparing disk ${DISK}..."
     
-    # Unmount any existing filesystems
+    # Safely unmount any existing filesystems
     log INFO "Unmounting existing filesystems..."
-    umount "${DISK}"* 2>/dev/null || true
+    for mount_point in $(mount | grep "^${DISK}" | awk '{print $3}' | sort -r); do
+        umount "$mount_point" 2>/dev/null || {
+            log WARNING "Failed to unmount $mount_point, trying lazy unmount"
+            umount -l "$mount_point" 2>/dev/null || true
+        }
+    done
     
     # Stop any swap on the disk
-    swapoff "${DISK}"* 2>/dev/null || true
+    for swap_dev in $(swapon --show=NAME --noheadings | grep "^${DISK}"); do
+        swapoff "$swap_dev" 2>/dev/null || {
+            log WARNING "Failed to disable swap on $swap_dev"
+        }
+    done
     
     # Wipe disk
     log INFO "Wiping disk signatures..."
@@ -655,15 +777,34 @@ SCRIPT
     # Clean up
     rm -f /mnt/tmp/*.sh
     
-    # Unmount filesystems in reverse order
-    umount /mnt/dev/pts 2>/dev/null || true
-    umount /mnt/dev 2>/dev/null || true  
-    umount /mnt/sys 2>/dev/null || true
-    umount /mnt/proc 2>/dev/null || true
-    umount /mnt/boot/efi || log WARNING "Failed to unmount EFI partition"
+    # Comprehensive cleanup with error handling
+    log INFO "Cleaning up installation environment..."
     
-    # Export pool cleanly
-    zpool export "${POOL_NAME}" || log WARNING "Failed to export ZFS pool"
+    # Unmount filesystems in proper reverse order
+    local mounts_to_unmount=(
+        "/mnt/dev/pts"
+        "/mnt/dev"
+        "/mnt/sys" 
+        "/mnt/proc"
+        "/mnt/boot/efi"
+    )
+    
+    for mount_point in "${mounts_to_unmount[@]}"; do
+        if mountpoint -q "$mount_point" 2>/dev/null; then
+            if ! umount "$mount_point" 2>/dev/null; then
+                log WARNING "Failed to unmount $mount_point, trying lazy unmount"
+                umount -l "$mount_point" 2>/dev/null || log WARNING "Lazy unmount also failed for $mount_point"
+            fi
+        fi
+    done
+    
+    # Export pool cleanly with verification
+    if zpool list "${POOL_NAME}" &>/dev/null; then
+        if ! zpool export "${POOL_NAME}" 2>/dev/null; then
+            log WARNING "Failed to export ZFS pool cleanly, forcing export"
+            zpool export -f "${POOL_NAME}" 2>/dev/null || log ERROR "Failed to force export ZFS pool"
+        fi
+    fi
     
     save_state "INSTALLATION_COMPLETE" "true"
     

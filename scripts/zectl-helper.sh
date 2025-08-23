@@ -71,12 +71,20 @@ confirm() {
     [[ "$response" =~ ^[Yy]$ ]]
 }
 
+check_zectl() {
+    if ! command -v zectl &> /dev/null; then
+        error "zectl is not installed or not in PATH"
+    fi
+}
+
 get_current_be() {
-    zectl list -H | grep -E '^\s*N\s+R' | awk '{print $1}' | head -1
+    check_zectl
+    zectl list -H 2>/dev/null | grep -E '^\s*N\s+R' | awk '{print $1}' | head -1
 }
 
 create_safe() {
     local be_name="${1:-}"
+    check_zectl
     
     if [[ -z "$be_name" ]]; then
         be_name="manual-$(date +%Y%m%d-%H%M%S)"
@@ -84,24 +92,36 @@ create_safe() {
     
     echo "Creating new boot environment: $be_name"
     
+    # Validate BE name
+    if [[ ! "$be_name" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]]; then
+        error "Invalid boot environment name. Use only letters, numbers, dots, underscores, and hyphens."
+    fi
+    
     # Create snapshot of current BE first
     local current_be=$(get_current_be)
     if [[ -n "$current_be" ]]; then
         local snapshot_name="backup-$(date +%Y%m%d-%H%M%S)"
-        zectl snapshot "${current_be}@${snapshot_name}"
-        success "Created backup snapshot: ${current_be}@${snapshot_name}"
+        if zectl snapshot "${current_be}@${snapshot_name}" 2>/dev/null; then
+            success "Created backup snapshot: ${current_be}@${snapshot_name}"
+        else
+            warning "Failed to create backup snapshot, but continuing..."
+        fi
     fi
     
     # Create new BE
-    zectl create "$be_name"
-    success "Created boot environment: $be_name"
+    if zectl create "$be_name" 2>/dev/null; then
+        success "Created boot environment: $be_name"
+    else
+        error "Failed to create boot environment: $be_name"
+    fi
     
     # Show current BEs
     echo -e "\nCurrent boot environments:"
-    zectl list
+    zectl list 2>/dev/null || warning "Failed to list boot environments"
 }
 
 system_upgrade() {
+    check_zectl
     echo "Preparing for system upgrade..."
     
     # Create pre-upgrade BE
@@ -113,17 +133,26 @@ system_upgrade() {
     fi
     
     # Create snapshot
-    zectl snapshot "${current_be}@${be_name}"
-    success "Created snapshot: ${current_be}@${be_name}"
+    if zectl snapshot "${current_be}@${be_name}" 2>/dev/null; then
+        success "Created snapshot: ${current_be}@${be_name}"
+    else
+        error "Failed to create pre-upgrade snapshot"
+    fi
     
     # Create new BE for upgrade
     local upgrade_be="upgrade-$(date +%Y%m%d-%H%M%S)"
-    zectl create -e "$current_be" "$upgrade_be"
-    success "Created upgrade environment: $upgrade_be"
+    if zectl create -e "$current_be" "$upgrade_be" 2>/dev/null; then
+        success "Created upgrade environment: $upgrade_be"
+    else
+        error "Failed to create upgrade environment"
+    fi
     
     # Activate new BE
-    zectl activate "$upgrade_be"
-    success "Activated: $upgrade_be"
+    if zectl activate "$upgrade_be" 2>/dev/null; then
+        success "Activated: $upgrade_be"
+    else
+        error "Failed to activate upgrade environment"
+    fi
     
     echo -e "\n${GREEN}Ready for upgrade!${NC}"
     echo "The new boot environment '$upgrade_be' is active."
@@ -131,72 +160,120 @@ system_upgrade() {
     echo "If upgrade fails, you can rollback with: $0 rollback $current_be"
     
     if confirm "Proceed with system upgrade (apt upgrade)?"; then
-        apt update && apt upgrade -y
-        success "System upgrade completed"
-        echo "Reboot to use the upgraded environment"
+        if apt update && apt upgrade -y; then
+            success "System upgrade completed"
+            echo "Reboot to use the upgraded environment"
+        else
+            warning "System upgrade encountered issues. You may want to rollback."
+        fi
     fi
 }
 
 rollback_be() {
     local target_be="${1:-}"
+    check_zectl
     
     if [[ -z "$target_be" ]]; then
-        # Get previous BE
-        target_be=$(zectl list -H | grep -v -E '^\s*N' | head -1 | awk '{print $1}')
+        # Get previous BE (more robust method)
+        local be_list
+        if ! be_list=$(zectl list -H 2>/dev/null); then
+            error "Failed to get boot environments list"
+        fi
+        
+        target_be=$(echo "$be_list" | grep -v -E '^\s*N' | head -1 | awk '{print $1}')
         
         if [[ -z "$target_be" ]]; then
             error "No previous boot environment found"
         fi
+        
+        echo "Auto-selected previous BE: $target_be"
     fi
     
     echo "Rolling back to: $target_be"
     
-    if ! zectl list -H | grep -q "^${target_be}"; then
+    # Verify BE exists
+    if ! zectl list -H 2>/dev/null | grep -q "^${target_be}\s"; then
         error "Boot environment '$target_be' not found"
     fi
     
     if confirm "Activate '$target_be' and reboot?"; then
-        zectl activate "$target_be"
-        success "Activated: $target_be"
-        
-        if confirm "Reboot now?"; then
-            systemctl reboot
+        if zectl activate "$target_be" 2>/dev/null; then
+            success "Activated: $target_be"
+            
+            if confirm "Reboot now?"; then
+                systemctl reboot
+            else
+                echo "Remember to reboot to complete the rollback"
+            fi
         else
-            echo "Remember to reboot to complete the rollback"
+            error "Failed to activate boot environment: $target_be"
         fi
     fi
 }
 
 cleanup_old_bes() {
     local days="${1:-30}"
+    check_zectl
+    
     local current_be=$(get_current_be)
     local current_date=$(date +%s)
     
     echo "Cleaning up boot environments older than $days days..."
     
+    # Get BE list with more reliable parsing
+    local be_list
+    if ! be_list=$(zectl list -H 2>/dev/null); then
+        error "Failed to get boot environments list"
+    fi
+    
     while IFS= read -r line; do
-        local be_name=$(echo "$line" | awk '{print $1}')
-        local creation_date=$(echo "$line" | awk '{print $4, $5}')
+        # Skip empty lines and header
+        [[ -z "$line" ]] && continue
+        [[ "$line" =~ ^Name ]] && continue
         
-        # Skip current BE
-        if [[ "$be_name" == "$current_be" ]]; then
+        local be_name=$(echo "$line" | awk '{print $1}')
+        
+        # Skip current BE and invalid names
+        if [[ "$be_name" == "$current_be" ]] || [[ -z "$be_name" ]]; then
             continue
         fi
         
-        # Convert creation date to seconds
-        local be_date=$(date -d "$creation_date" +%s 2>/dev/null || echo 0)
+        # Try to get creation time from ZFS properties (more reliable)
+        local be_date=0
+        local zfs_dataset="rpool/ROOT/${be_name}"
+        
+        if zfs list "$zfs_dataset" &>/dev/null; then
+            # Get creation property from ZFS (Unix timestamp)
+            local creation_prop=$(zfs get -H -o value creation "$zfs_dataset" 2>/dev/null || echo "")
+            
+            if [[ -n "$creation_prop" ]]; then
+                # Convert ZFS creation time to epoch seconds
+                be_date=$(date -d "$creation_prop" +%s 2>/dev/null || echo 0)
+            fi
+        fi
+        
+        # Fallback to parsing zectl output if ZFS method failed
+        if [[ $be_date -eq 0 ]]; then
+            local creation_str=$(echo "$line" | awk '{for(i=4;i<=NF;i++) printf "%s ", $i; print ""}')
+            be_date=$(date -d "$creation_str" +%s 2>/dev/null || echo 0)
+        fi
         
         if [[ $be_date -gt 0 ]]; then
             local age_days=$(( (current_date - be_date) / 86400 ))
             
             if [[ $age_days -gt $days ]]; then
                 if confirm "Delete '$be_name' (${age_days} days old)?"; then
-                    zectl destroy "$be_name"
-                    success "Deleted: $be_name"
+                    if zectl destroy "$be_name" 2>/dev/null; then
+                        success "Deleted: $be_name"
+                    else
+                        warning "Failed to delete: $be_name"
+                    fi
                 fi
             fi
+        else
+            warning "Could not determine creation date for: $be_name (skipping)"
         fi
-    done < <(zectl list -H | tail -n +2)
+    done <<< "$be_list"
     
     success "Cleanup completed"
 }

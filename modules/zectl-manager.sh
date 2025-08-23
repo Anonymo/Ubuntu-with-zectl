@@ -56,6 +56,10 @@ create_boot_environment() {
     local be_name="$1"
     local description="${2:-}"
     
+    if ! check_zectl_available; then
+        return 1
+    fi
+    
     log INFO "Creating boot environment: ${be_name}"
     
     if [[ -n "${description}" ]]; then
@@ -68,11 +72,19 @@ create_boot_environment() {
 activate_boot_environment() {
     local be_name="$1"
     
+    if ! check_zectl_available; then
+        return 1
+    fi
+    
     log INFO "Activating boot environment: ${be_name}"
     zectl activate "${be_name}"
 }
 
 list_boot_environments() {
+    if ! check_zectl_available; then
+        return 1
+    fi
+    
     log INFO "Listing boot environments:"
     zectl list
 }
@@ -144,14 +156,40 @@ umount_boot_environment() {
 # Systemd-boot Integration
 #############################################################
 
+check_zectl_available() {
+    if ! command -v zectl &> /dev/null; then
+        log ERROR "zectl command not found. Please install zectl first."
+        return 1
+    fi
+    return 0
+}
+
 update_systemd_boot_entries() {
     log INFO "Updating systemd-boot entries for boot environments..."
+    
+    # Check if zectl is available
+    if ! check_zectl_available; then
+        return 1
+    fi
     
     local esp="/boot/efi"
     local loader_dir="${esp}/loader"
     local entries_dir="${loader_dir}/entries"
     
-    # Clear old entries
+    # Ensure directories exist
+    if [[ ! -d "$entries_dir" ]]; then
+        log ERROR "Boot entries directory not found: $entries_dir"
+        return 1
+    fi
+    
+    # Get boot environments list first, before clearing entries
+    local be_list
+    if ! be_list=$(zectl list 2>/dev/null); then
+        log ERROR "Failed to get boot environments list. Not clearing boot entries."
+        return 1
+    fi
+    
+    # Only clear old entries if we successfully got the list
     rm -f "${entries_dir}"/zectl-*.conf
     
     # Generate entries for each boot environment
@@ -183,7 +221,7 @@ EOF
             echo "console-mode max" >> "${loader_dir}/loader.conf"
             echo "editor no" >> "${loader_dir}/loader.conf"
         fi
-    done < <(zectl list)
+    done <<< "$be_list"
 }
 
 #############################################################
