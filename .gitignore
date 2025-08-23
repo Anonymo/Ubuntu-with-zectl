@@ -1,0 +1,34 @@
+# Configuration files
+config/installer.conf
+
+# Temporary files
+*.tmp
+*.log
+*.swp
+*~
+
+# Backup files
+*.bak
+*.backup
+*.zfs
+*.zfs.gz
+
+# Installation state
+/tmp/ubuntu-zfs-installer.state
+
+# IDE/Editor files
+.vscode/
+.idea/
+*.sublime-*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Python (for zectl)
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/

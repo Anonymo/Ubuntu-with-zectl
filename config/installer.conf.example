@@ -1,0 +1,60 @@
+# Ubuntu ZFS Boot Environment Installer Configuration
+# Copy this file to installer.conf and modify as needed
+
+# Installation type: server, desktop, or custom
+INSTALL_TYPE="server"
+
+# Target disk device (e.g., /dev/sda, /dev/nvme0n1)
+# Leave empty for interactive selection
+DISK=""
+
+# ZFS pool name
+POOL_NAME="rpool"
+
+# Enable encryption: on or off
+ENCRYPTION="off"
+
+# Swap size (use G for GB, M for MB)
+SWAP_SIZE="4G"
+
+# System configuration
+USERNAME=""
+HOSTNAME=""
+TIMEZONE="UTC"
+LOCALE="en_US.UTF-8"
+
+# Ubuntu version (auto-detected if not specified)
+# Supported: 22.04, 24.04, 25.04
+UBUNTU_VERSION=""
+
+# Advanced ZFS options
+ZFS_COMPRESSION="lz4"  # lz4, zstd, gzip, off
+ZFS_ASHIFT="12"        # 12 for 4K sectors (most modern drives)
+ZFS_RECORDSIZE=""      # Leave empty for default
+ZFS_ATIME="off"        # Access time updates (off recommended)
+
+# Boot environment options
+BE_AUTO_SNAPSHOT="true"           # Enable automatic snapshots
+BE_MAX_SNAPSHOTS="10"             # Maximum auto snapshots to keep
+BE_SNAPSHOT_ON_APT="true"         # Snapshot before apt operations
+BE_CREATE_RECOVERY="true"          # Create recovery boot environment
+
+# Network configuration (optional)
+NETWORK_INTERFACE=""              # e.g., eth0, ens33
+NETWORK_TYPE="dhcp"              # dhcp or static
+NETWORK_IP=""                    # For static configuration
+NETWORK_NETMASK=""               # For static configuration  
+NETWORK_GATEWAY=""               # For static configuration
+NETWORK_DNS=""                   # For static configuration
+
+# Package selection for custom installation
+# Space-separated list of additional packages
+CUSTOM_PACKAGES=""
+
+# Post-installation script (optional)
+# Path to script to run after installation
+POST_INSTALL_SCRIPT=""
+
+# Debug options
+DEBUG="false"                    # Enable debug output
+KEEP_TEMP_FILES="false"         # Keep temporary files after installation
