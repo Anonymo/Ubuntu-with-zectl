@@ -18,6 +18,11 @@ readonly CONFIG_DIR="${SCRIPT_DIR}/config"
 readonly LOG_DIR="/var/log/ubuntu-zfs-installer"
 readonly LOG_FILE="${LOG_DIR}/install-$(date +%Y%m%d-%H%M%S).log"
 
+# Source modules if available
+if [[ -f "${MODULES_DIR}/zectl-manager.sh" ]]; then
+    source "${MODULES_DIR}/zectl-manager.sh"
+fi
+
 # Colors for output
 readonly RED='\033[0;31m'
 readonly GREEN='\033[0;32m'
@@ -51,6 +56,8 @@ log() {
     local message="$*"
     local timestamp="$(date '+%Y-%m-%d %H:%M:%S')"
     
+    # Ensure log directory exists before writing
+    mkdir -p "$(dirname "${LOG_FILE}")" 2>/dev/null || true
     echo "[${timestamp}] [${level}] ${message}" >> "${LOG_FILE}"
     
     case "${level}" in
@@ -127,7 +134,7 @@ check_dependencies() {
     done
     
     # Install required packages with better error handling
-    local packages=("debootstrap" "gdisk" "zfsutils-linux" "efibootmgr" "arch-install-scripts" "dosfstools")
+    local packages=("debootstrap" "gdisk" "zfsutils-linux" "efibootmgr" "dosfstools")
     
     log INFO "Installing packages: ${packages[*]}"
     if ! apt-get install -y "${packages[@]}"; then
@@ -148,9 +155,17 @@ check_dependencies() {
         modprobe zfs || die "Failed to load ZFS module"
     fi
     
-    # Check if we're in a live environment
+    # Check if we're in a live environment and add universe repository safely
     if [[ ! -f /etc/apt/sources.list ]] || ! grep -q "universe" /etc/apt/sources.list; then
         log WARNING "Adding universe repository..."
+        
+        # Ensure software-properties-common is installed first
+        if ! dpkg -l software-properties-common &>/dev/null; then
+            apt-get install -y software-properties-common || {
+                log WARNING "Failed to install software-properties-common"
+            }
+        fi
+        
         add-apt-repository universe -y 2>/dev/null || {
             log WARNING "Failed to add universe repository, continuing anyway"
         }
@@ -481,9 +496,14 @@ create_zfs_pool() {
     
     if [[ "${ENCRYPTION}" == "on" ]]; then
         if [[ -n "${PASSPHRASE}" ]]; then
+            # Create key file for encryption (more reliable than prompt)
+            local key_file="/tmp/zfs-${POOL_NAME}.key"
+            printf "%s" "${PASSPHRASE}" > "${key_file}"
+            chmod 600 "${key_file}"
+            
             pool_opts+=(
                 -O encryption=aes-256-gcm
-                -O keylocation=prompt
+                -O keylocation="file://${key_file}"
                 -O keyformat=passphrase
             )
         else
@@ -493,10 +513,12 @@ create_zfs_pool() {
     
     log INFO "Creating ZFS pool on ${zfs_partition}..."
     
-    if [[ "${ENCRYPTION}" == "on" ]]; then
-        echo "$PASSPHRASE" | zpool create -f "${pool_opts[@]}" "${POOL_NAME}" "${zfs_partition}" || die "Failed to create encrypted ZFS pool"
-    else
-        zpool create -f "${pool_opts[@]}" "${POOL_NAME}" "${zfs_partition}" || die "Failed to create ZFS pool"
+    # Create pool (encryption handled via keyfile if enabled)
+    zpool create -f "${pool_opts[@]}" "${POOL_NAME}" "${zfs_partition}" || die "Failed to create ZFS pool"
+    
+    # Clean up temporary key file
+    if [[ "${ENCRYPTION}" == "on" ]] && [[ -f "/tmp/zfs-${POOL_NAME}.key" ]]; then
+        rm -f "/tmp/zfs-${POOL_NAME}.key"
     fi
     
     # Create datasets
@@ -533,14 +555,19 @@ detect_ubuntu_codename() {
     case "${UBUNTU_VERSION}" in
         22.04) echo "jammy" ;;
         24.04) echo "noble" ;;
-        25.04) echo "plucky" ;;
+        24.10) echo "oracular" ;;
         *) 
-            # Try to detect from current environment
+            # Try to detect from current environment for unknown versions
             if [[ -f /etc/os-release ]]; then
                 . /etc/os-release
-                echo "${VERSION_CODENAME:-jammy}"
+                if [[ -n "${VERSION_CODENAME:-}" ]]; then
+                    echo "${VERSION_CODENAME}"
+                else
+                    log ERROR "Unknown Ubuntu version ${UBUNTU_VERSION} and no codename detected"
+                    die "Please specify a known Ubuntu version (22.04, 24.04, 24.10) or update the script"
+                fi
             else
-                echo "jammy"
+                die "Cannot detect Ubuntu version. Please specify UBUNTU_VERSION in config."
             fi
             ;;
     esac
@@ -549,11 +576,12 @@ detect_ubuntu_codename() {
 mount_chroot_filesystems() {
     log INFO "Mounting filesystems for chroot environment..."
     
-    # Mount necessary filesystems for chroot
+    # Mount necessary filesystems for chroot (including /run for systemd/apt)
     mount -t proc proc /mnt/proc || die "Failed to mount proc"
     mount -t sysfs sys /mnt/sys || die "Failed to mount sys"
     mount -B /dev /mnt/dev || die "Failed to mount dev"
     mount -t devpts devpts /mnt/dev/pts || die "Failed to mount devpts"
+    mount -B /run /mnt/run || die "Failed to mount run"
 }
 
 configure_apt_sources() {
@@ -601,8 +629,8 @@ install_base_system() {
     # Essential packages for ZFS boot
     local essential_packages="locales,systemd-sysv,zfsutils-linux,zfs-initramfs"
     
-    # Base packages
-    local base_packages="linux-image-generic,linux-headers-generic,grub-efi-amd64,efibootmgr,systemd-boot"
+    # Base packages (bootctl comes from systemd, no separate systemd-boot package needed)
+    local base_packages="linux-image-generic,linux-headers-generic,efibootmgr,systemd"
     
     # Additional packages based on install type
     case "${INSTALL_TYPE}" in
@@ -723,8 +751,9 @@ console-mode max
 editor no
 EOF
     
-    # Get kernel version
-    local kernel_version=$(chroot /mnt ls /boot/vmlinuz-* | sed 's/.*vmlinuz-//' | head -n1)
+    # Get latest kernel version (sorted properly)
+    local kernel_version
+    kernel_version=$(chroot /mnt bash -c 'ls -1 /boot/vmlinuz-* 2>/dev/null | sed "s#.*/vmlinuz-##" | sort -V | tail -1')
     if [[ -z "$kernel_version" ]]; then
         die "No kernel found in /boot"
     fi
@@ -755,17 +784,21 @@ finalize_installation() {
 #!/bin/bash
 set -e
 
+# Set non-interactive frontend for apt
+export DEBIAN_FRONTEND=noninteractive
+
 # Create user
 if ! id "${USERNAME}" &>/dev/null; then
     useradd -m -G sudo,adm,cdrom,plugdev,lpadmin -s /bin/bash "${USERNAME}"
 fi
 
-# Set passwords
+# Set TEMPORARY passwords (user should change on first login)
 echo "${USERNAME}:changeme" | chpasswd
 echo "root:changeme" | chpasswd
 
-# Configure sudo
-echo "${USERNAME} ALL=(ALL) NOPASSWD:ALL" > "/etc/sudoers.d/${USERNAME}"
+# Configure sudo with timeout (more secure than NOPASSWD:ALL)
+echo "${USERNAME} ALL=(ALL) PASSWD:ALL" > "/etc/sudoers.d/${USERNAME}"
+echo "Defaults:${USERNAME} timestamp_timeout=15" >> "/etc/sudoers.d/${USERNAME}"
 chmod 440 "/etc/sudoers.d/${USERNAME}"
 
 # Enable services
@@ -780,6 +813,14 @@ if systemctl list-unit-files | grep -q NetworkManager; then
     systemctl enable NetworkManager
 fi
 
+# Force password change on first login (more secure)
+chage -d 0 "${USERNAME}"
+chage -d 0 root
+
+# Ensure CA certificates are updated
+apt-get update -y
+apt-get install -y ca-certificates
+
 # Update initramfs
 update-initramfs -c -k all
 
@@ -792,9 +833,6 @@ SCRIPT
     export USERNAME
     chroot /mnt /bin/bash -c "USERNAME='${USERNAME}' /tmp/finalize.sh" || die "Failed to finalize installation"
     
-    # Install zectl after system is ready
-    install_zectl
-    
     # Clean up
     rm -f /mnt/tmp/*.sh
     
@@ -805,6 +843,7 @@ SCRIPT
     local mounts_to_unmount=(
         "/mnt/dev/pts"
         "/mnt/dev"
+        "/mnt/run"
         "/mnt/sys" 
         "/mnt/proc"
         "/mnt/boot/efi"

@@ -71,6 +71,12 @@ confirm() {
     [[ "$response" =~ ^[Yy]$ ]]
 }
 
+check_root() {
+    if [[ $EUID -ne 0 ]]; then
+        error "This operation requires root privileges. Please run with sudo."
+    fi
+}
+
 check_zectl() {
     if ! command -v zectl &> /dev/null; then
         error "zectl is not installed or not in PATH"
@@ -121,6 +127,7 @@ create_safe() {
 }
 
 system_upgrade() {
+    check_root
     check_zectl
     echo "Preparing for system upgrade..."
     
@@ -213,6 +220,7 @@ rollback_be() {
 
 cleanup_old_bes() {
     local days="${1:-30}"
+    check_root
     check_zectl
     
     local current_be=$(get_current_be)
@@ -223,7 +231,7 @@ cleanup_old_bes() {
     # Get BE list with machine-readable parsing (much more reliable)
     local be_list
     if ! be_list=$(zectl list -p 2>/dev/null); then
-        log WARNING "Failed to get machine-readable BE list, falling back to regular format"
+        warning "Failed to get machine-readable BE list, falling back to regular format"
         if ! be_list=$(zectl list -H 2>/dev/null); then
             error "Failed to get boot environments list"
         fi

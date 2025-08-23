@@ -190,17 +190,19 @@ update_systemd_boot_entries() {
     fi
     
     # Create temporary directory for new entries (atomic operation)
-    local temp_dir=$(mktemp -d)
-    if [[ ! -d "$temp_dir" ]]; then
-        log ERROR "Failed to create temporary directory"
-        return 1
-    fi
-    
-    # Cleanup function for temp directory
-    cleanup_temp() {
-        rm -rf "$temp_dir"
-    }
-    trap cleanup_temp EXIT
+    # Use subshell to contain the trap
+    (
+        local temp_dir=$(mktemp -d)
+        if [[ ! -d "$temp_dir" ]]; then
+            log ERROR "Failed to create temporary directory"
+            exit 1
+        fi
+        
+        # Cleanup function for temp directory (local to subshell)
+        cleanup_temp() {
+            rm -rf "$temp_dir"
+        }
+        trap cleanup_temp EXIT
     
     # Generate entries for each boot environment
     while IFS= read -r line; do
@@ -243,7 +245,8 @@ EOF
         return 1
     fi
     
-    log SUCCESS "Boot entries updated successfully"
+        log SUCCESS "Boot entries updated successfully"
+    ) # End of subshell
 }
 
 #############################################################
