@@ -703,15 +703,68 @@ detect_architecture() {
     esac
 }
 
+copy_live_system() {
+    log INFO "Copying live system to target (much faster than debootstrap)..."
+    
+    # Create a basic filesystem structure first
+    mkdir -p /mnt/{dev,proc,sys,tmp,var/tmp,var/cache/apt}
+    chmod 1777 /mnt/tmp /mnt/var/tmp
+    
+    # Copy the live filesystem, excluding certain directories we'll handle separately
+    log INFO "Copying live system files... (this may take a few minutes)"
+    
+    rsync -aHAXS --exclude='/dev/*' --exclude='/proc/*' --exclude='/sys/*' \
+          --exclude='/tmp/*' --exclude='/run/*' --exclude='/mnt/*' \
+          --exclude='/media/*' --exclude='/cdrom/*' --exclude='/var/tmp/*' \
+          --exclude='/var/cache/apt/archives/*' \
+          / /mnt/ || die "Failed to copy live system"
+    
+    log INFO "Live system copied successfully"
+}
+
+install_missing_packages() {
+    local codename="$1" 
+    local mirror="$2"
+    
+    # Only needed if we used live system copy
+    if [[ ! -f /usr/lib/live/mount/medium/casper/filesystem.squashfs ]] && [[ ! -f /cdrom/casper/filesystem.squashfs ]]; then
+        return  # debootstrap already installed everything
+    fi
+    
+    log INFO "Installing ZFS packages not included in live system..."
+    
+    # Essential ZFS packages that might not be on Live USB
+    local zfs_packages=("zfsutils-linux" "zfs-initramfs" "zfs-dkms")
+    
+    # Update package cache in target
+    chroot /mnt apt-get update || log WARNING "Failed to update package cache in target"
+    
+    # Install missing packages
+    for package in "${zfs_packages[@]}"; do
+        if ! chroot /mnt dpkg -l "$package" &>/dev/null; then
+            log INFO "Installing missing package: $package"
+            chroot /mnt apt-get install -y "$package" || log WARNING "Failed to install $package"
+        else
+            log INFO "Package $package already installed"
+        fi
+    done
+}
+
 run_debootstrap() {
     local codename="$1"
-    local mirror="$2"
+    local mirror="$2" 
     local all_packages="$3"
     
-    # Detect system architecture
-    local target_arch=$(detect_architecture)
+    # Check if we should use the faster live system copy method
+    if [[ -f /usr/lib/live/mount/medium/casper/filesystem.squashfs ]] || [[ -f /cdrom/casper/filesystem.squashfs ]]; then
+        log INFO "Live environment detected, using fast copy method instead of debootstrap"
+        copy_live_system
+        return
+    fi
     
-    log INFO "Running debootstrap for $target_arch with packages: ${all_packages}"
+    # Fallback to traditional debootstrap for non-live environments
+    local target_arch=$(detect_architecture)
+    log INFO "Using debootstrap fallback for $target_arch with packages: ${all_packages}"
     
     debootstrap \
         --arch="${target_arch}" \
@@ -920,6 +973,9 @@ install_base_system() {
     run_debootstrap "$codename" "$mirror" "$all_packages"
     configure_apt_sources "$codename" "$mirror"
     mount_chroot_filesystems
+    
+    # Install missing ZFS packages if we used live system copy
+    install_missing_packages "$codename" "$mirror"
     
     save_state "BASE_INSTALLED" "true"
 }
