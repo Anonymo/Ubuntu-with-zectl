@@ -332,6 +332,29 @@ interactive_config() {
         fi
     done
     
+    # Get password for the user (secure)
+    while true; do
+        read -rsp "Enter password for $USERNAME: " USER_PASSWORD
+        echo
+        read -rsp "Confirm password: " USER_PASSWORD_CONFIRM
+        echo
+        
+        if [[ "$USER_PASSWORD" == "$USER_PASSWORD_CONFIRM" ]]; then
+            if [[ ${#USER_PASSWORD} -ge 8 ]]; then
+                break
+            else
+                echo "Password must be at least 8 characters long."
+            fi
+        else
+            echo "Passwords do not match. Please try again."
+        fi
+    done
+    
+    # Get root password (optional)
+    echo "Set root password (optional - leave empty to disable root login):"
+    read -rsp "Root password: " ROOT_PASSWORD
+    echo
+    
     while true; do
         read -rp "Enter hostname: " HOSTNAME
         if validate_hostname "$HOSTNAME"; then
@@ -479,20 +502,25 @@ create_zfs_pool() {
         die "ZFS partition $zfs_partition not found"
     fi
     
-    # Create pool with optimal settings
+    # Create pool with settings from config
     local pool_opts=(
-        -o ashift=12
+        -o ashift="${ZFS_ASHIFT:-12}"
         -o autotrim=on
         -O acltype=posixacl
         -O canmount=off
-        -O compression=lz4
+        -O compression="${ZFS_COMPRESSION:-lz4}"
         -O dnodesize=auto
         -O normalization=formD
-        -O relatime=on
+        -O relatime="${ZFS_ATIME:-off}"
         -O xattr=sa
         -O mountpoint=/
         -R /mnt
     )
+    
+    # Add recordsize if specified
+    if [[ -n "${ZFS_RECORDSIZE:-}" ]]; then
+        pool_opts+=(-O recordsize="${ZFS_RECORDSIZE}")
+    fi
     
     if [[ "${ENCRYPTION}" == "on" ]]; then
         if [[ -n "${PASSPHRASE}" ]]; then
@@ -792,9 +820,16 @@ if ! id "${USERNAME}" &>/dev/null; then
     useradd -m -G sudo,adm,cdrom,plugdev,lpadmin -s /bin/bash "${USERNAME}"
 fi
 
-# Set TEMPORARY passwords (user should change on first login)
-echo "${USERNAME}:changeme" | chpasswd
-echo "root:changeme" | chpasswd
+# Set user password from interactive input
+echo "${USERNAME}:${USER_PASSWORD}" | chpasswd
+
+# Set root password or disable root login
+if [[ -n "${ROOT_PASSWORD}" ]]; then
+    echo "root:${ROOT_PASSWORD}" | chpasswd
+else
+    # Disable root login if no password set
+    passwd -l root
+fi
 
 # Configure sudo with timeout (more secure than NOPASSWD:ALL)
 echo "${USERNAME} ALL=(ALL) PASSWD:ALL" > "/etc/sudoers.d/${USERNAME}"
@@ -813,25 +848,95 @@ if systemctl list-unit-files | grep -q NetworkManager; then
     systemctl enable NetworkManager
 fi
 
-# Force password change on first login (more secure)
-chage -d 0 "${USERNAME}"
-chage -d 0 root
+# Note: No forced password change since user set password during installation
 
 # Ensure CA certificates are updated
 apt-get update -y
 apt-get install -y ca-certificates
 
 # Update initramfs
+# Set up automatic kernel syncing to ESP
+cat > /etc/apt/apt.conf.d/99-sync-kernels-to-esp <<'HOOK'
+# Automatically sync kernel and initrd to ESP after apt operations
+DPkg::Post-Invoke {
+    "if [ -d /boot/efi ] && [ -x /usr/local/bin/sync-kernels-to-esp ]; then /usr/local/bin/sync-kernels-to-esp; fi";
+};
+HOOK
+
+# Create the kernel sync script
+cat > /usr/local/bin/sync-kernels-to-esp <<'SYNCSCRIPT'
+#!/bin/bash
+# Sync latest kernel and initrd to ESP for systemd-boot
+
+set -euo pipefail
+
+ESP="/boot/efi"
+LOG_FACILITY="local0.info"
+
+# Function to log messages
+log_message() {
+    logger -p "$LOG_FACILITY" -t "kernel-sync" "$1" 2>/dev/null || true
+    echo "[$(date)] $1" >&2
+}
+
+# Check if ESP is mounted
+if ! mountpoint -q "$ESP"; then
+    log_message "ESP not mounted at $ESP, skipping kernel sync"
+    exit 0
+fi
+
+# Get latest kernel version
+KERNEL_VERSION=$(ls -1 /boot/vmlinuz-* 2>/dev/null | sed "s#.*/vmlinuz-##" | sort -V | tail -1)
+
+if [[ -z "$KERNEL_VERSION" ]]; then
+    log_message "No kernel found in /boot"
+    exit 1
+fi
+
+log_message "Syncing kernel $KERNEL_VERSION to ESP"
+
+# Copy kernel and initrd to ESP
+if [[ -f "/boot/vmlinuz-$KERNEL_VERSION" ]]; then
+    cp "/boot/vmlinuz-$KERNEL_VERSION" "$ESP/" || {
+        log_message "Failed to copy kernel to ESP"
+        exit 1
+    }
+fi
+
+if [[ -f "/boot/initrd.img-$KERNEL_VERSION" ]]; then
+    cp "/boot/initrd.img-$KERNEL_VERSION" "$ESP/" || {
+        log_message "Failed to copy initrd to ESP"
+        exit 1
+    }
+fi
+
+# Update systemd-boot entry if it exists
+if [[ -f "$ESP/loader/entries/ubuntu.conf" ]]; then
+    sed -i "s/vmlinuz-.*/vmlinuz-$KERNEL_VERSION/" "$ESP/loader/entries/ubuntu.conf"
+    sed -i "s/initrd.img-.*/initrd.img-$KERNEL_VERSION/" "$ESP/loader/entries/ubuntu.conf"
+    log_message "Updated systemd-boot entry for kernel $KERNEL_VERSION"
+fi
+
+log_message "Kernel sync completed successfully"
+SYNCSCRIPT
+
+# Make the sync script executable
+chmod +x /usr/local/bin/sync-kernels-to-esp
+
+# Update initramfs
 update-initramfs -c -k all
+
+# Run initial kernel sync
+/usr/local/bin/sync-kernels-to-esp || true
 
 echo "Finalization complete"
 SCRIPT
     
     chmod +x /mnt/tmp/finalize.sh
     
-    # Set USERNAME in chroot environment
-    export USERNAME
-    chroot /mnt /bin/bash -c "USERNAME='${USERNAME}' /tmp/finalize.sh" || die "Failed to finalize installation"
+    # Set variables in chroot environment
+    export USERNAME USER_PASSWORD ROOT_PASSWORD
+    chroot /mnt /bin/bash -c "USERNAME='${USERNAME}' USER_PASSWORD='${USER_PASSWORD}' ROOT_PASSWORD='${ROOT_PASSWORD}' /tmp/finalize.sh" || die "Failed to finalize installation"
     
     # Clean up
     rm -f /mnt/tmp/*.sh
