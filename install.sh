@@ -784,7 +784,7 @@ install_missing_packages() {
     local mirror="$2"
     
     # Only needed if we used live system copy
-    if [[ ! -f /usr/lib/live/mount/medium/casper/filesystem.squashfs ]] && [[ ! -f /cdrom/casper/filesystem.squashfs ]]; then
+    if ! is_live_environment; then
         return  # debootstrap already installed everything
     fi
     
@@ -807,21 +807,113 @@ install_missing_packages() {
     done
 }
 
+debug_live_detection() {
+    log INFO "Debugging live environment detection..."
+    
+    # Check paths
+    local live_paths=(
+        "/usr/lib/live/mount/medium/casper/filesystem.squashfs"
+        "/cdrom/casper/filesystem.squashfs" 
+        "/media/*/casper/filesystem.squashfs"
+        "/run/live/medium/casper/filesystem.squashfs"
+    )
+    
+    for path in "${live_paths[@]}"; do
+        if [[ -f $path ]]; then
+            log INFO "✓ Found: $path"
+        else
+            log INFO "✗ Not found: $path"
+        fi
+    done
+    
+    # Check cmdline
+    local cmdline=$(cat /proc/cmdline 2>/dev/null || echo "")
+    log INFO "Kernel cmdline: $cmdline"
+    
+    # Check processes
+    local casper_procs=$(pgrep -f casper 2>/dev/null || echo "")
+    log INFO "Casper processes: ${casper_procs:-none}"
+    
+    # Check users  
+    if id ubuntu >/dev/null 2>&1; then
+        log INFO "✓ Ubuntu user exists"
+    else
+        log INFO "✗ Ubuntu user not found"
+    fi
+    
+    # Check mounted filesystems
+    log INFO "Mounted filesystems with 'live' or 'casper':"
+    mount | grep -E "(live|casper)" || log INFO "  None found"
+}
+
+is_live_environment() {
+    # Debug mode for troubleshooting
+    if [[ "${DEBUG:-false}" == "true" ]]; then
+        debug_live_detection
+    fi
+    
+    # Multiple ways to detect live environment
+    local live_paths=(
+        "/usr/lib/live/mount/medium/casper/filesystem.squashfs"
+        "/cdrom/casper/filesystem.squashfs"
+        "/media/*/casper/filesystem.squashfs"
+        "/run/live/medium/casper/filesystem.squashfs"
+    )
+    
+    # Check for live environment indicators
+    for path in "${live_paths[@]}"; do
+        # Handle wildcards properly
+        if [[ "$path" == *"*"* ]]; then
+            for expanded_path in $path; do
+                if [[ -f "$expanded_path" ]]; then
+                    log INFO "Live environment detected at: $expanded_path"
+                    return 0
+                fi
+            done
+        elif [[ -f $path ]]; then
+            log INFO "Live environment detected at: $path"
+            return 0
+        fi
+    done
+    
+    # Check for live boot parameter
+    if grep -q "boot=live" /proc/cmdline 2>/dev/null; then
+        log INFO "Live environment detected from kernel cmdline"
+        return 0
+    fi
+    
+    # Check for casper process
+    if pgrep -f casper >/dev/null 2>&1; then
+        log INFO "Live environment detected from casper process"
+        return 0
+    fi
+    
+    # Check for live user
+    if id ubuntu >/dev/null 2>&1; then
+        log INFO "Live environment detected from ubuntu user"
+        return 0
+    fi
+    
+    log WARNING "Live environment not detected - falling back to debootstrap"
+    return 1
+}
+
 run_debootstrap() {
     local codename="$1"
     local mirror="$2" 
     local all_packages="$3"
     
     # Check if we should use the faster live system copy method
-    if [[ -f /usr/lib/live/mount/medium/casper/filesystem.squashfs ]] || [[ -f /cdrom/casper/filesystem.squashfs ]]; then
-        log INFO "Live environment detected, using fast copy method instead of debootstrap"
+    if is_live_environment; then
+        log INFO "Using optimized live system copy instead of debootstrap"
         copy_live_system
         return
     fi
     
     # Fallback to traditional debootstrap for non-live environments
     local target_arch=$(detect_architecture)
-    log INFO "Using debootstrap fallback for $target_arch with packages: ${all_packages}"
+    log INFO "No live environment detected, using debootstrap for $target_arch"
+    log INFO "Packages to install: ${all_packages}"
     
     debootstrap \
         --arch="${target_arch}" \
