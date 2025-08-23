@@ -336,7 +336,7 @@ setup_apt_hooks() {
     
     # Pre-upgrade hook
     cat > /etc/apt/apt.conf.d/80-zectl-snapshot <<'CONF'
-// Automatically create boot environment snapshots before package operations
+# Automatically create boot environment snapshots before package operations
 DPkg::Pre-Invoke {
     "if [ -x /usr/local/bin/zectl ] && [ -f /usr/local/bin/zectl-apt-snapshot ]; then /usr/local/bin/zectl-apt-snapshot pre; fi";
 };

@@ -113,6 +113,22 @@ check_root() {
     fi
 }
 
+check_uefi() {
+    log INFO "Checking UEFI system requirements..."
+    
+    # Check if system is booted in UEFI mode
+    if [[ ! -d /sys/firmware/efi ]]; then
+        die "This installer requires a UEFI system. Boot your system in UEFI mode to continue."
+    fi
+    
+    # Check for EFI variables support
+    if [[ ! -d /sys/firmware/efi/efivars ]]; then
+        log WARNING "EFI variables not accessible. Some boot management features may not work."
+    fi
+    
+    log INFO "UEFI system detected"
+}
+
 check_dependencies() {
     log INFO "Checking and installing dependencies..."
     
@@ -451,8 +467,15 @@ prepare_disk() {
     # Create partitions
     log INFO "Creating partitions..."
     sgdisk -n1:1M:+1G -t1:EF00 "${DISK}" || die "Failed to create EFI partition"  # EFI partition
-    sgdisk -n2:0:+${SWAP_SIZE} -t2:8200 "${DISK}" || die "Failed to create swap partition"  # Swap partition  
-    sgdisk -n3:0:0 -t3:BF00 "${DISK}" || die "Failed to create ZFS partition"  # ZFS partition
+    
+    # Create swap partition only if swap is enabled
+    if [[ "$SWAP_SIZE" != "0" ]] && [[ "$SWAP_SIZE" != "0G" ]] && [[ "$SWAP_SIZE" != "0M" ]]; then
+        sgdisk -n2:0:+${SWAP_SIZE} -t2:8200 "${DISK}" || die "Failed to create swap partition"  # Swap partition
+        sgdisk -n3:0:0 -t3:BF00 "${DISK}" || die "Failed to create ZFS partition"  # ZFS partition
+    else
+        log INFO "Swap disabled, creating ZFS partition as partition 2"
+        sgdisk -n2:0:0 -t2:BF00 "${DISK}" || die "Failed to create ZFS partition"  # ZFS partition
+    fi
     
     # Wait for devices to settle
     sleep 3
@@ -462,10 +485,17 @@ prepare_disk() {
     
     # Get partition names
     local efi_partition=$(get_partition_name "${DISK}" "1")
-    local swap_partition=$(get_partition_name "${DISK}" "2")
-    local zfs_partition=$(get_partition_name "${DISK}" "3")
+    local swap_partition=""
+    local zfs_partition=""
     
-    log INFO "Partitions: EFI=${efi_partition}, Swap=${swap_partition}, ZFS=${zfs_partition}"
+    if [[ "$SWAP_SIZE" != "0" ]] && [[ "$SWAP_SIZE" != "0G" ]] && [[ "$SWAP_SIZE" != "0M" ]]; then
+        swap_partition=$(get_partition_name "${DISK}" "2")
+        zfs_partition=$(get_partition_name "${DISK}" "3")
+        log INFO "Partitions: EFI=${efi_partition}, Swap=${swap_partition}, ZFS=${zfs_partition}"
+    else
+        zfs_partition=$(get_partition_name "${DISK}" "2")
+        log INFO "Partitions: EFI=${efi_partition}, ZFS=${zfs_partition} (no swap)"
+    fi
     
     # Wait for partition devices to exist
     local timeout=10
@@ -483,7 +513,7 @@ prepare_disk() {
     mkfs.vfat -F32 -n EFI "$efi_partition" || die "Failed to format EFI partition"
     
     # Create swap
-    if [[ "$SWAP_SIZE" != "0" ]] && [[ "$SWAP_SIZE" != "0G" ]]; then
+    if [[ "$SWAP_SIZE" != "0" ]] && [[ "$SWAP_SIZE" != "0G" ]] && [[ "$SWAP_SIZE" != "0M" ]]; then
         log INFO "Setting up swap..."
         mkswap -L swap "$swap_partition" || die "Failed to create swap"
     fi
@@ -514,7 +544,7 @@ create_zfs_pool() {
         -O compression="${ZFS_COMPRESSION:-lz4}"
         -O dnodesize=auto
         -O normalization=formD
-        -O relatime="${ZFS_ATIME:-off}"
+        -O atime="${ZFS_ATIME:-off}"
         -O xattr=sa
         -O mountpoint=/
         -R /mnt
@@ -527,14 +557,22 @@ create_zfs_pool() {
     
     if [[ "${ENCRYPTION}" == "on" ]]; then
         if [[ -n "${PASSPHRASE}" ]]; then
-            # Create key file for encryption (more reliable than prompt)
-            local key_file="/tmp/zfs-${POOL_NAME}.key"
+            # Create key file for encryption in the target system
+            local key_dir="/mnt/etc/zfs/keys"
+            local key_file="${key_dir}/${POOL_NAME}.key"
+            local target_key_path="/etc/zfs/keys/${POOL_NAME}.key"
+            
+            # Ensure key directory exists in target
+            mkdir -p "${key_dir}"
+            chmod 700 "${key_dir}"
+            
+            # Write key file to target system
             printf "%s" "${PASSPHRASE}" > "${key_file}"
             chmod 600 "${key_file}"
             
             pool_opts+=(
                 -O encryption=aes-256-gcm
-                -O keylocation="file://${key_file}"
+                -O keylocation="file://${target_key_path}"
                 -O keyformat=passphrase
             )
         else
@@ -546,11 +584,6 @@ create_zfs_pool() {
     
     # Create pool (encryption handled via keyfile if enabled)
     zpool create -f "${pool_opts[@]}" "${POOL_NAME}" "${zfs_partition}" || die "Failed to create ZFS pool"
-    
-    # Clean up temporary key file
-    if [[ "${ENCRYPTION}" == "on" ]] && [[ -f "/tmp/zfs-${POOL_NAME}.key" ]]; then
-        rm -f "/tmp/zfs-${POOL_NAME}.key"
-    fi
     
     # Create datasets
     log INFO "Creating ZFS datasets..."
@@ -633,15 +666,37 @@ EOF
     cp /etc/resolv.conf /mnt/etc/ || log WARNING "Failed to copy resolv.conf"
 }
 
+detect_architecture() {
+    local arch=$(uname -m)
+    case "$arch" in
+        x86_64)
+            echo "amd64"
+            ;;
+        aarch64)
+            echo "arm64"
+            ;;
+        armv7l)
+            echo "armhf"
+            ;;
+        *)
+            log WARNING "Unknown architecture: $arch, defaulting to amd64"
+            echo "amd64"
+            ;;
+    esac
+}
+
 run_debootstrap() {
     local codename="$1"
     local mirror="$2"
     local all_packages="$3"
     
-    log INFO "Running debootstrap with packages: ${all_packages}"
+    # Detect system architecture
+    local target_arch=$(detect_architecture)
+    
+    log INFO "Running debootstrap for $target_arch with packages: ${all_packages}"
     
     debootstrap \
-        --arch=amd64 \
+        --arch="${target_arch}" \
         --include="${all_packages}" \
         --components=main,restricted,universe,multiverse \
         "${codename}" \
@@ -698,7 +753,7 @@ UUID=$(blkid -s UUID -o value "${EFI_PARTITION}") /boot/efi vfat defaults 0 1
 EOF
 
     # Add swap if configured
-    if [[ "$SWAP_SIZE" != "0" ]] && [[ "$SWAP_SIZE" != "0G" ]]; then
+    if [[ "$SWAP_SIZE" != "0" ]] && [[ "$SWAP_SIZE" != "0G" ]] && [[ "$SWAP_SIZE" != "0M" ]]; then
         echo "UUID=$(blkid -s UUID -o value "${SWAP_PARTITION}") none swap sw 0 0" >> /mnt/etc/fstab
     fi
     
@@ -719,7 +774,6 @@ EOF
     chroot /mnt dpkg-reconfigure -f noninteractive tzdata || log WARNING "Failed to reconfigure tzdata"
     
     # Configure locale
-    echo "LANG=${LOCALE}" > /mnt/etc/locale.conf
     echo "${LOCALE} UTF-8" > /mnt/etc/locale.gen
     chroot /mnt locale-gen || log WARNING "Failed to generate locales"
     chroot /mnt update-locale LANG="${LOCALE}" || log WARNING "Failed to update locale"
@@ -1017,6 +1071,7 @@ main() {
     
     # Check prerequisites
     check_root
+    check_uefi
     check_dependencies
     detect_ubuntu_version
     
