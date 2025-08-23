@@ -14,6 +14,12 @@ This installer gives you:
 
 Boot from Ubuntu Live USB, then:
 
+**One-liner install:**
+```bash
+wget -O install.sh https://raw.githubusercontent.com/Anonymo/Ubuntu-with-zectl/main/install.sh && chmod +x install.sh && sudo ./install.sh
+```
+
+**Or step-by-step:**
 ```bash
 # Install prerequisites (if not already available)
 sudo apt update
@@ -103,6 +109,10 @@ Advanced flags:
   ```bash
   # Configure installer.conf first, then:
   sudo ./install.sh --non-interactive
+  ```
+- `--restart` - Clean up previous install and restart fresh (fixes disk locks)
+  ```bash
+  sudo ./install.sh --restart
   ```
 
 ## Helper Scripts

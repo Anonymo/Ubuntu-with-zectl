@@ -1552,6 +1552,35 @@ case "${1:-}" in
         log INFO "Installation state reset"
         exit 0
         ;;
+    --restart)
+        log INFO "Performing comprehensive cleanup and restart..."
+        
+        # Unmount any ZFS filesystems
+        zfs unmount -a 2>/dev/null || true
+        
+        # Export any ZFS pools
+        zpool export rpool 2>/dev/null || true
+        zpool export -a 2>/dev/null || true
+        
+        # Clear device mapper entries
+        dmsetup remove_all 2>/dev/null || true
+        
+        # Kill processes that might be holding disk locks
+        fuser -km /mnt 2>/dev/null || true
+        
+        # Unmount any remaining mounts
+        umount -R /mnt 2>/dev/null || true
+        
+        # Clear installer state
+        rm -f "${STATE_FILE}"
+        
+        log SUCCESS "System cleaned up successfully"
+        log INFO "Restarting installer in 3 seconds..."
+        sleep 3
+        
+        # Restart the installer
+        exec "$0" "$@"
+        ;;
 esac
 
 # Run main installation
