@@ -64,6 +64,10 @@ Key settings:
 - `ENCRYPTION` - Enable disk encryption (`on` or `off`)
 - `INSTALL_TYPE` - `server`, `desktop`, or `minimal`
 
+Advanced flags:
+- `--dry-run` prints a summary of planned actions and exits without making changes.
+- `--non-interactive` runs without prompts; requires `DISK`, `USERNAME`, and `HOSTNAME` to be set in `installer.conf`.
+
 ## Helper Scripts
 
 We include a helper script for common tasks:
@@ -145,6 +149,10 @@ See the [Wiki](https://github.com/Anonymo/Ubuntu-with-zectl/wiki) for:
 - Remote backups
 - Performance tuning
 - Custom configurations
+
+## Secure Boot
+
+If Secure Boot is enabled, unsigned kernels loaded via systemd-boot will not boot. Either disable Secure Boot in firmware or enroll your own keys/sign the kernel and initrd. This installer does not configure Secure Boot key management.
 
 ## ⚠️ Warning
 
