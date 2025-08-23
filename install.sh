@@ -196,8 +196,10 @@ check_dependencies() {
 
 detect_ubuntu_version() {
     if [[ -f /etc/os-release ]]; then
-        . /etc/os-release
-        UBUNTU_VERSION="${VERSION_ID}"
+        # Read VERSION_ID without sourcing to avoid conflicts with our readonly VERSION
+        local version_id
+        version_id=$(grep '^VERSION_ID=' /etc/os-release | cut -d= -f2 | tr -d '"')
+        UBUNTU_VERSION="${version_id}"
         log INFO "Detected Ubuntu version: ${UBUNTU_VERSION}"
     else
         die "Cannot detect Ubuntu version"
@@ -638,9 +640,10 @@ detect_ubuntu_codename() {
         *) 
             # Try to detect from current environment for unknown versions
             if [[ -f /etc/os-release ]]; then
-                . /etc/os-release
-                if [[ -n "${VERSION_CODENAME:-}" ]]; then
-                    echo "${VERSION_CODENAME}"
+                local version_codename
+                version_codename=$(grep '^VERSION_CODENAME=' /etc/os-release | cut -d= -f2 | tr -d '"')
+                if [[ -n "${version_codename:-}" ]]; then
+                    echo "${version_codename}"
                 else
                     log ERROR "Unknown Ubuntu version ${UBUNTU_VERSION} and no codename detected"
                     die "Please specify a known Ubuntu version (22.04, 24.04, 24.10) or update the script"
