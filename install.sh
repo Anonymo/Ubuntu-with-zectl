@@ -1575,11 +1575,11 @@ case "${1:-}" in
         rm -f "${STATE_FILE}"
         
         log SUCCESS "System cleaned up successfully"
-        log INFO "Restarting installer in 3 seconds..."
-        sleep 3
-        
-        # Restart the installer
-        exec "$0" "$@"
+        log INFO "Cleanup complete! Please run the installer again:"
+        echo
+        echo "  sudo $0"
+        echo
+        exit 0
         ;;
 esac
 
