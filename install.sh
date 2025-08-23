@@ -1207,8 +1207,20 @@ echo "zectl installed and configured successfully"
 SCRIPT
     
     chmod +x /mnt/tmp/install_zectl.sh
-    chroot /mnt /tmp/install_zectl.sh || log WARNING "zectl installation failed, but continuing..."
+    chroot /mnt /tmp/install_zectl.sh || die "zectl installation failed. The system would be unmanageable."
     
+    # Verify zectl is properly installed and functional
+    log INFO "Verifying zectl installation..."
+    if ! chroot /mnt command -v zectl >/dev/null 2>&1; then
+        die "zectl command not found after installation. Boot environment management unavailable."
+    fi
+    
+    # Test basic zectl functionality
+    if ! chroot /mnt zectl list >/dev/null 2>&1; then
+        die "zectl installed but not functional. Cannot manage boot environments."
+    fi
+    
+    log SUCCESS "zectl installation verified successfully"
     save_state "ZECTL_INSTALLED" "true"
 }
 
