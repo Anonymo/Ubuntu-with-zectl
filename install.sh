@@ -704,22 +704,79 @@ detect_architecture() {
 }
 
 copy_live_system() {
-    log INFO "Copying live system to target (much faster than debootstrap)..."
+    log INFO "Copying live system to target (optimized for speed)..."
+    
+    # Optimize I/O scheduler for better copy performance if possible
+    local target_disk=$(echo "${DISK}" | sed 's/[0-9]*$//')
+    local disk_name=$(basename "$target_disk")
+    if [[ -f "/sys/block/${disk_name}/queue/scheduler" ]]; then
+        echo "noop" > "/sys/block/${disk_name}/queue/scheduler" 2>/dev/null || true
+        log INFO "Set I/O scheduler to noop for faster copying"
+    fi
     
     # Create a basic filesystem structure first
     mkdir -p /mnt/{dev,proc,sys,tmp,var/tmp,var/cache/apt}
     chmod 1777 /mnt/tmp /mnt/var/tmp
     
-    # Copy the live filesystem, excluding certain directories we'll handle separately
-    log INFO "Copying live system files... (this may take a few minutes)"
+    # Optimize for different installation types
+    local exclude_patterns=(
+        '--exclude=/dev/*' '--exclude=/proc/*' '--exclude=/sys/*'
+        '--exclude=/tmp/*' '--exclude=/run/*' '--exclude=/mnt/*'
+        '--exclude=/media/*' '--exclude=/cdrom/*' '--exclude=/var/tmp/*'
+        '--exclude=/var/cache/apt/archives/*' '--exclude=/var/log/*'
+        '--exclude=/home/ubuntu/*' '--exclude=/root/.cache/*'
+    )
     
-    rsync -aHAXS --exclude='/dev/*' --exclude='/proc/*' --exclude='/sys/*' \
-          --exclude='/tmp/*' --exclude='/run/*' --exclude='/mnt/*' \
-          --exclude='/media/*' --exclude='/cdrom/*' --exclude='/var/tmp/*' \
-          --exclude='/var/cache/apt/archives/*' \
+    # Add more exclusions for minimal/server installs
+    if [[ "${INSTALL_TYPE}" == "minimal" ]] || [[ "${INSTALL_TYPE}" == "server" ]]; then
+        exclude_patterns+=(
+            '--exclude=/usr/share/doc/*' '--exclude=/usr/share/man/*'
+            '--exclude=/usr/share/locale/*' '--exclude=/usr/share/help/*'
+            '--exclude=/usr/share/fonts/truetype/*' '--exclude=/usr/share/pixmaps/*'
+            '--exclude=/usr/share/icons/*' '--exclude=/usr/share/sounds/*'
+            '--exclude=/usr/lib/libreoffice/*' '--exclude=/snap/*'
+        )
+        log INFO "Using minimal copy mode for ${INSTALL_TYPE} install"
+    fi
+    
+    # Estimate copy size and time
+    log INFO "Estimating copy size..."
+    local total_size=$(du -sb --exclude=/dev --exclude=/proc --exclude=/sys \
+                          --exclude=/tmp --exclude=/run --exclude=/mnt \
+                          --exclude=/media --exclude=/cdrom / 2>/dev/null | \
+                          awk '{print $1}' || echo "unknown")
+    
+    if [[ "$total_size" != "unknown" ]]; then
+        local size_gb=$((total_size / 1024 / 1024 / 1024))
+        log INFO "Copying approximately ${size_gb}GB of system files..."
+        log INFO "This may take 5-15 minutes depending on your storage speed"
+    fi
+    
+    # Copy with optimized settings and progress
+    log INFO "Starting optimized copy (progress shown below)..."
+    
+    # Use optimized rsync settings:
+    # -a: archive mode (preserves permissions, times, etc.)
+    # -H: preserve hard links
+    # -A: preserve ACLs
+    # -X: preserve extended attributes  
+    # -S: handle sparse files efficiently
+    # --info=progress2: show total progress
+    # --no-inc-recursive: faster for large transfers
+    # --whole-file: don't use delta transfer (faster for local copies)
+    rsync -aHAXS --info=progress2 --no-inc-recursive --whole-file \
+          "${exclude_patterns[@]}" \
           / /mnt/ || die "Failed to copy live system"
     
-    log INFO "Live system copied successfully"
+    # Clean up some live-specific files that shouldn't be in the installed system
+    log INFO "Cleaning up live system artifacts..."
+    rm -rf /mnt/var/lib/live /mnt/var/crash/* /mnt/var/log/* 2>/dev/null || true
+    
+    # Create fresh log directory
+    mkdir -p /mnt/var/log
+    chmod 755 /mnt/var/log
+    
+    log SUCCESS "Live system copied and cleaned up"
 }
 
 install_missing_packages() {
