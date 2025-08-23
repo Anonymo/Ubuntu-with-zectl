@@ -83,6 +83,22 @@ check_zectl() {
     fi
 }
 
+# Detect pool name (env override or first pool)
+get_pool_name() {
+    if [[ -n "${POOL_NAME:-}" ]]; then
+        echo "${POOL_NAME}"
+        return
+    fi
+    zpool list -H -o name 2>/dev/null | head -1
+}
+
+# Root dataset path helper
+dataset_root() {
+    local pool
+    pool=$(get_pool_name)
+    [[ -n "$pool" ]] && echo "$pool/ROOT"
+}
+
 get_current_be() {
     check_zectl
     zectl list -H 2>/dev/null | grep -E '^\s*N\s+R' | awk '{print $1}' | head -1
@@ -251,7 +267,9 @@ cleanup_old_bes() {
         
         # Try to get creation time from ZFS properties (more reliable)
         local be_date=0
-        local zfs_dataset="rpool/ROOT/${be_name}"
+        local ds_root
+        ds_root=$(dataset_root)
+        local zfs_dataset="${ds_root}/${be_name}"
         
         if zfs list "$zfs_dataset" &>/dev/null; then
             # Get creation property from ZFS (Unix timestamp)
@@ -304,7 +322,9 @@ backup_be() {
     echo "Backing up '$be_name' to '$backup_file'..."
     
     # Get the dataset path
-    local dataset="rpool/ROOT/${be_name}"
+    local ds_root
+    ds_root=$(dataset_root)
+    local dataset="${ds_root}/${be_name}"
     
     # Create snapshot for backup
     local snapshot="${dataset}@backup-$(date +%Y%m%d-%H%M%S)"
@@ -357,14 +377,16 @@ show_status() {
     # Show disk usage
     echo -e "\n${GREEN}Disk Usage${NC}"
     echo "==========="
-    zfs list -o name,used,avail,refer,mountpoint -t filesystem -r rpool/ROOT
+    local ds_root
+    ds_root=$(dataset_root)
+    zfs list -o name,used,avail,refer,mountpoint -t filesystem -r "$ds_root"
     
     # Show snapshots
     echo -e "\n${GREEN}Snapshots${NC}"
     echo "=========="
-    zfs list -t snapshot -o name,used,creation -r rpool/ROOT | head -20
+    zfs list -t snapshot -o name,used,creation -r "$ds_root" | head -20
     
-    local snapshot_count=$(zfs list -t snapshot -r rpool/ROOT | wc -l)
+    local snapshot_count=$(zfs list -t snapshot -r "$ds_root" | wc -l)
     if [[ $snapshot_count -gt 20 ]]; then
         echo "... and $((snapshot_count - 20)) more snapshots"
     fi
@@ -392,7 +414,9 @@ show_history() {
     # Show recent snapshots
     echo -e "\n${GREEN}Recent Snapshots${NC}"
     echo "================"
-    zfs list -t snapshot -o name,creation -r rpool/ROOT -s creation | tail -10
+    local ds_root
+    ds_root=$(dataset_root)
+    zfs list -t snapshot -o name,creation -r "$ds_root" -s creation | tail -10
 }
 
 # Parse arguments
