@@ -18,7 +18,10 @@ readonly CONFIG_DIR="${SCRIPT_DIR}/config"
 readonly LOG_DIR="/var/log/ubuntu-zfs-installer"
 readonly LOG_FILE="${LOG_DIR}/install-$(date +%Y%m%d-%H%M%S).log"
 
-# Source modules if available
+# Source modules if available  
+# Note: zectl-manager.sh provides advanced BE management functions
+# These are made available to other scripts but not used directly in install.sh
+# The main installer focuses on initial setup; post-install management uses the modules
 if [[ -f "${MODULES_DIR}/zectl-manager.sh" ]]; then
     source "${MODULES_DIR}/zectl-manager.sh"
 fi
@@ -728,6 +731,9 @@ EOF
 }
 
 install_zectl() {
+    # This function handles the initial installation of zectl in the target system
+    # After this completes, the zectl-manager.sh module functions become available
+    # for advanced boot environment management operations
     log INFO "Installing zectl for boot environment management..."
     
     cat > /mnt/tmp/install_zectl.sh <<'SCRIPT'
@@ -976,12 +982,20 @@ SCRIPT
     log SUCCESS "Installation complete!"
     echo -e "${GREEN}Installation completed successfully!${NC}"
     echo
-    echo "Default login credentials:"
+    echo "System Information:"
     echo "  Username: ${USERNAME}"
-    echo "  Password: changeme"
-    echo "  Root password: changeme"
+    echo "  Hostname: ${HOSTNAME}"
+    echo "  ZFS Pool: ${POOL_NAME}"
+    echo "  Encryption: ${ENCRYPTION}"
     echo
-    echo "IMPORTANT: Change these passwords after first login!"
+    if [[ -n "${ROOT_PASSWORD}" ]]; then
+        echo "You can log in as '${USERNAME}' or 'root' with the passwords you set during installation."
+    else
+        echo "You can log in as '${USERNAME}' with the password you set during installation."
+        echo "Root login is disabled for security."
+    fi
+    echo
+    echo "Boot environments are managed with 'zectl' - see README.md for usage examples."
     echo
     if confirm "Reboot now?"; then
         reboot

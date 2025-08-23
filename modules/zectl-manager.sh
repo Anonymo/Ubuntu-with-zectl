@@ -3,8 +3,13 @@
 #############################################################
 # zectl Manager Module
 # 
-# Provides boot environment management functionality
-# using zectl for ZFS-based Ubuntu systems
+# Provides advanced boot environment management functionality
+# using zectl for ZFS-based Ubuntu systems.
+#
+# IMPORTANT: This module requires zectl to be installed first.
+# The main install.sh script handles zectl installation,
+# then these functions become available for post-install
+# boot environment management operations.
 #############################################################
 
 set -euo pipefail
