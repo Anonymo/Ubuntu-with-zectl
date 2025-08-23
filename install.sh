@@ -722,11 +722,53 @@ run_debootstrap() {
         "${mirror}" || die "Failed to run debootstrap"
 }
 
+detect_best_mirror() {
+    # Try to detect an optimized mirror from the live environment
+    if [[ -n "${UBUNTU_MIRROR}" ]]; then
+        echo "${UBUNTU_MIRROR}"
+        return
+    fi
+    
+    # Check if we're on a Live ISO with pre-configured sources
+    if [[ -f /etc/apt/sources.list ]]; then
+        local live_mirror=$(grep -m1 "^deb " /etc/apt/sources.list | awk '{print $2}')
+        if [[ -n "$live_mirror" ]] && [[ "$live_mirror" != *"archive.ubuntu.com"* ]]; then
+            log INFO "Detected optimized mirror from live environment: $live_mirror"
+            echo "$live_mirror"
+            return
+        fi
+    fi
+    
+    # Try to detect country-specific mirror
+    local country_code=""
+    if command -v curl &> /dev/null; then
+        country_code=$(curl -s --connect-timeout 5 http://ipinfo.io/country 2>/dev/null || true)
+    fi
+    
+    case "${country_code,,}" in
+        us) echo "http://us.archive.ubuntu.com/ubuntu" ;;
+        gb|uk) echo "http://gb.archive.ubuntu.com/ubuntu" ;;
+        ca) echo "http://ca.archive.ubuntu.com/ubuntu" ;;
+        de) echo "http://de.archive.ubuntu.com/ubuntu" ;;
+        fr) echo "http://fr.archive.ubuntu.com/ubuntu" ;;
+        au) echo "http://au.archive.ubuntu.com/ubuntu" ;;
+        jp) echo "http://jp.archive.ubuntu.com/ubuntu" ;;
+        kr) echo "http://kr.archive.ubuntu.com/ubuntu" ;;
+        cn) echo "http://cn.archive.ubuntu.com/ubuntu" ;;
+        in) echo "http://in.archive.ubuntu.com/ubuntu" ;;
+        br) echo "http://br.archive.ubuntu.com/ubuntu" ;;
+        *)  
+            log INFO "Using default archive (country: ${country_code:-unknown})"
+            echo "http://archive.ubuntu.com/ubuntu" 
+            ;;
+    esac
+}
+
 install_base_system() {
     log INFO "Installing base system..."
     
     local codename=$(detect_ubuntu_codename)
-    local mirror="${UBUNTU_MIRROR:-http://archive.ubuntu.com/ubuntu}"
+    local mirror=$(detect_best_mirror)
     
     log INFO "Using Ubuntu ${UBUNTU_VERSION} (${codename}) from ${mirror}"
     
