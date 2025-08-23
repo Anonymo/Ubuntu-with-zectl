@@ -740,6 +740,8 @@ detect_best_mirror() {
     fi
     
     # Try to detect country-specific mirror
+    # Note: This is a best-effort attempt via a public geo-IP service
+    # and may not be accurate if using a VPN or proxy
     local country_code=""
     if command -v curl &> /dev/null; then
         country_code=$(curl -s --connect-timeout 5 http://ipinfo.io/country 2>/dev/null || true)
