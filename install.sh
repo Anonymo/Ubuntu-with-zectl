@@ -298,9 +298,42 @@ interactive_config() {
         esac
     done
     
-    # Select disk
-    echo -e "\nAvailable disks:"
-    lsblk -d -o NAME,SIZE,TYPE,MODEL | grep disk
+    # Select disk with better labeling and protection
+    echo -e "\nAvailable disks for installation:"
+    echo "================================================"
+    
+    # Get current mount point to identify boot device
+    local boot_device=$(df /boot 2>/dev/null | tail -1 | awk '{print $1}' | sed 's/[0-9]*$//')
+    local live_device=$(mount | grep " / " | awk '{print $1}' | sed 's/[0-9]*$//')
+    
+    # List disks with helpful information
+    while IFS= read -r line; do
+        local disk_name=$(echo "$line" | awk '{print $1}')
+        local disk_path="/dev/$disk_name"
+        local disk_info=$(echo "$line" | cut -d' ' -f2-)
+        
+        # Check if this is installation media or boot device
+        local warning=""
+        
+        # Check for Ventoy or other USB installers
+        if lsblk -no LABEL "$disk_path" 2>/dev/null | grep -qi "ventoy\|ubuntu\|live"; then
+            warning=" [⚠️  INSTALLATION MEDIA - DO NOT USE]"
+        elif [[ "$disk_path" == "$boot_device" ]] || [[ "$disk_path" == "$live_device" ]]; then
+            warning=" [⚠️  CURRENT BOOT DEVICE]"
+        fi
+        
+        # Check for existing data
+        local partitions=$(lsblk -n "$disk_path" 2>/dev/null | grep -c "part" || echo "0")
+        if [[ $partitions -gt 0 ]] && [[ -z "$warning" ]]; then
+            warning=" [Contains $partitions partition(s) - will be ERASED]"
+        fi
+        
+        echo "  $disk_name: $disk_info$warning"
+    done < <(lsblk -d -o NAME,SIZE,TYPE,MODEL | grep disk)
+    
+    echo "================================================"
+    echo -e "${RED}WARNING: The selected disk will be completely ERASED!${NC}"
+    echo
     
     while true; do
         read -rp "Enter disk device (e.g., sda, nvme0n1): " disk_input
@@ -312,10 +345,25 @@ interactive_config() {
             DISK="/dev/${disk_input}"
         fi
         
-        if [[ -b "${DISK}" ]]; then
-            break
-        else
+        # Validate disk exists
+        if [[ ! -b "${DISK}" ]]; then
             echo "Error: ${DISK} is not a valid block device. Please try again."
+            continue
+        fi
+        
+        # Check if it's installation media
+        if lsblk -no LABEL "${DISK}" 2>/dev/null | grep -qi "ventoy\|ubuntu\|live"; then
+            echo -e "${RED}ERROR: This appears to be your installation media!${NC}"
+            echo "Please select a different disk for installation."
+            continue
+        fi
+        
+        # Double confirm for safety
+        echo -e "\n${YELLOW}You selected: ${DISK}${NC}"
+        lsblk -o NAME,SIZE,FSTYPE,LABEL,MOUNTPOINT "${DISK}" 2>/dev/null || true
+        echo
+        if confirm "This disk will be COMPLETELY ERASED. Are you sure?"; then
+            break
         fi
     done
     
@@ -1473,11 +1521,38 @@ SCRIPT
 # Main Function
 #############################################################
 
+show_usage() {
+    cat <<EOF
+Ubuntu ZFS Boot Environment Installer v${VERSION}
+
+Usage: $(basename "$0") [OPTIONS]
+
+Options:
+    --help          Show this help message
+    --dry-run       Test configuration without making changes
+    --non-interactive  Run without prompts (requires config)
+    --restart       Clean up and restart after failed install
+    --reset         Reset installer state only
+    --resume        Resume interrupted installation
+    --version       Show version information
+
+Examples:
+    $(basename "$0")                # Interactive installation
+    $(basename "$0") --dry-run      # Test configuration
+    $(basename "$0") --restart      # Clean and restart
+    
+Configuration file: installer.conf
+Log directory: ${LOG_DIR}
+
+EOF
+}
+
 main() {
     # Setup logging
     mkdir -p "${LOG_DIR}"
     
     log INFO "Ubuntu ZFS Boot Environment Installer v${VERSION}"
+    log INFO "Run with --help for available options"
     log INFO "Starting installation process..."
     
     # Check prerequisites
@@ -1530,14 +1605,7 @@ main() {
 # Handle arguments
 case "${1:-}" in
     --help|-h)
-        echo "Ubuntu ZFS Boot Environment Installer"
-        echo "Usage: $0 [options]"
-        echo
-        echo "Options:"
-        echo "  --help, -h     Show this help message"
-        echo "  --version, -v  Show version information"
-        echo "  --resume       Resume interrupted installation"
-        echo "  --reset        Reset installation state"
+        show_usage
         exit 0
         ;;
     --version|-v)
