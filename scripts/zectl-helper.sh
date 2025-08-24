@@ -83,13 +83,26 @@ check_zectl() {
     fi
 }
 
-# Detect pool name (env override or first pool)
+# Detect root pool name (env override or smart detection)
 get_pool_name() {
     if [[ -n "${POOL_NAME:-}" ]]; then
         echo "${POOL_NAME}"
         return
     fi
-    zpool list -H -o name 2>/dev/null | head -1
+    
+    # Smart detection: prefer pool containing ROOT datasets
+    local pools root_pool
+    pools=$(zpool list -H -o name 2>/dev/null)
+    
+    for pool in $pools; do
+        if zfs list -H -o name "${pool}/ROOT" 2>/dev/null | grep -q "^${pool}/ROOT$"; then
+            root_pool="$pool"
+            break
+        fi
+    done
+    
+    # Fallback to first pool if no ROOT dataset found
+    echo "${root_pool:-$(echo "$pools" | head -1)}"
 }
 
 # Root dataset path helper
@@ -101,7 +114,7 @@ dataset_root() {
 
 get_current_be() {
     check_zectl
-    zectl list -H 2>/dev/null | grep -E '^\s*N\s+R' | awk '{print $1}' | head -1
+    zectl list -p 2>/dev/null | grep -E '^NR' | cut -d$'\t' -f1 | head -1
 }
 
 create_safe() {
@@ -199,7 +212,7 @@ rollback_be() {
     if [[ -z "$target_be" ]]; then
         # Get previous BE (more robust method)
         local be_list
-        if ! be_list=$(zectl list -H 2>/dev/null); then
+        if ! be_list=$(zectl list -p 2>/dev/null); then
             error "Failed to get boot environments list"
         fi
         
@@ -215,7 +228,7 @@ rollback_be() {
     echo "Rolling back to: $target_be"
     
     # Verify BE exists
-    if ! zectl list -H 2>/dev/null | grep -q "^${target_be}\s"; then
+    if ! zectl list -p 2>/dev/null | grep -q "^${target_be}\s"; then
         error "Boot environment '$target_be' not found"
     fi
     
@@ -248,7 +261,7 @@ cleanup_old_bes() {
     local be_list
     if ! be_list=$(zectl list -p 2>/dev/null); then
         warning "Failed to get machine-readable BE list, falling back to regular format"
-        if ! be_list=$(zectl list -H 2>/dev/null); then
+        if ! be_list=$(zectl list -p 2>/dev/null); then
             error "Failed to get boot environments list"
         fi
     fi
@@ -409,7 +422,7 @@ show_history() {
         else
             echo -e "  ${be_name} - ${creation}"
         fi
-    done < <(zectl list -H | tail -n +2)
+    done < <(zectl list -p | tail -n +2)
     
     # Show recent snapshots
     echo -e "\n${GREEN}Recent Snapshots${NC}"

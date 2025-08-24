@@ -368,15 +368,7 @@ interactive_config() {
     done
     
     log INFO "Selected disk: ${DISK}"
-    
-    # Show disk info
-    echo "Disk information:"
-    lsblk "${DISK}" || true
-    echo
-    
-    if ! confirm "WARNING: This will ERASE ALL DATA on ${DISK}. Continue?"; then
-        die "Installation cancelled by user"
-    fi
+    echo -e "${GREEN}Disk selection confirmed.${NC}"
     
     # Pool name
     read -rp "Enter ZFS pool name [${POOL_NAME}]: " input
@@ -613,24 +605,15 @@ create_zfs_pool() {
     
     if [[ "${ENCRYPTION}" == "on" ]]; then
         if [[ -n "${PASSPHRASE}" ]]; then
-            # Create key file for encryption in the target system
-            local key_dir="/mnt/etc/zfs/keys"
-            local key_file="${key_dir}/${POOL_NAME}.key"
-            local target_key_path="/etc/zfs/keys/${POOL_NAME}.key"
-            
-            # Ensure key directory exists in target
-            mkdir -p "${key_dir}"
-            chmod 700 "${key_dir}"
-            
-            # Write key file to target system
-            printf "%s" "${PASSPHRASE}" > "${key_file}"
-            chmod 600 "${key_file}"
-            
+            # Use prompt-based encryption for security and boot reliability
+            # This avoids the chicken-and-egg problem of storing the key inside the encrypted dataset
             pool_opts+=(
                 -O encryption=aes-256-gcm
-                -O keylocation="file://${target_key_path}"
+                -O keylocation=prompt
                 -O keyformat=passphrase
             )
+            log INFO "ZFS encryption enabled with prompt-based unlock"
+            log INFO "You will need to enter your passphrase during boot to unlock the root filesystem"
         else
             die "Encryption enabled but no passphrase provided"
         fi
@@ -716,20 +699,51 @@ mount_chroot_filesystems() {
 
 configure_apt_sources() {
     local codename="$1"
-    local mirror="$2"
+    local fallback_mirror="$2"
     
-    log INFO "Configuring apt sources..."
+    log INFO "Configuring apt sources with optimized mirrors..."
     
-    # Configure apt sources with dedicated security mirror
+    # Always use the best available mirror for the installed system
+    local best_mirror=$(detect_best_mirror "$codename")
+    if [[ -z "$best_mirror" ]]; then
+        best_mirror="$fallback_mirror"
+        log WARNING "Could not detect optimal mirror, using fallback: $fallback_mirror"
+    else
+        log INFO "Configuring installed system with optimal mirror: $best_mirror"
+    fi
+    
+    # Determine security mirror based on architecture
+    local arch=$(detect_architecture)
+    local security_mirror
+    case "$arch" in
+        amd64) 
+            security_mirror="https://security.ubuntu.com/ubuntu" 
+            ;;
+        *) 
+            security_mirror="https://ports.ubuntu.com/ubuntu-ports" 
+            ;;
+    esac
+    
+    # Configure apt sources with optimized mirror and dedicated security mirror
     cat > /mnt/etc/apt/sources.list <<EOF
-deb ${mirror} ${codename} main restricted universe multiverse
-deb ${mirror} ${codename}-updates main restricted universe multiverse
-deb http://security.ubuntu.com/ubuntu ${codename}-security main restricted universe multiverse
-deb ${mirror} ${codename}-backports main restricted universe multiverse
+# Main repositories - optimized mirror
+deb ${best_mirror} ${codename} main restricted universe multiverse
+deb ${best_mirror} ${codename}-updates main restricted universe multiverse
+deb ${best_mirror} ${codename}-backports main restricted universe multiverse
+
+# Security updates - architecture-specific mirror for reliability
+deb ${security_mirror} ${codename}-security main restricted universe multiverse
+
+# Source repositories (commented out by default)
+# deb-src ${best_mirror} ${codename} main restricted universe multiverse
+# deb-src ${best_mirror} ${codename}-updates main restricted universe multiverse
+# deb-src http://security.ubuntu.com/ubuntu ${codename}-security main restricted universe multiverse
 EOF
     
     # Copy network configuration
     cp /etc/resolv.conf /mnt/etc/ || log WARNING "Failed to copy resolv.conf"
+    
+    log SUCCESS "Configured apt sources with optimal mirror: $best_mirror"
 }
 
 detect_architecture() {
@@ -751,154 +765,10 @@ detect_architecture() {
     esac
 }
 
-copy_live_system() {
-    log INFO "Copying live system to target (optimized for speed)..."
-    
-    # Optimize I/O scheduler for better copy performance if possible
-    local target_disk=$(echo "${DISK}" | sed 's/[0-9]*$//')
-    local disk_name=$(basename "$target_disk")
-    if [[ -f "/sys/block/${disk_name}/queue/scheduler" ]]; then
-        echo "noop" > "/sys/block/${disk_name}/queue/scheduler" 2>/dev/null || true
-        log INFO "Set I/O scheduler to noop for faster copying"
-    fi
-    
-    # Create a basic filesystem structure first
-    mkdir -p /mnt/{dev,proc,sys,tmp,var/tmp,var/cache/apt}
-    chmod 1777 /mnt/tmp /mnt/var/tmp
-    
-    # Optimize for different installation types
-    local exclude_patterns=(
-        '--exclude=/dev/*' '--exclude=/proc/*' '--exclude=/sys/*'
-        '--exclude=/tmp/*' '--exclude=/run/*' '--exclude=/mnt/*'
-        '--exclude=/media/*' '--exclude=/cdrom/*' '--exclude=/var/tmp/*'
-        '--exclude=/var/cache/apt/archives/*' '--exclude=/var/log/*'
-        '--exclude=/home/ubuntu/*' '--exclude=/root/.cache/*'
-    )
-    
-    # Add more exclusions for minimal/server installs
-    if [[ "${INSTALL_TYPE}" == "minimal" ]] || [[ "${INSTALL_TYPE}" == "server" ]]; then
-        exclude_patterns+=(
-            '--exclude=/usr/share/doc/*' '--exclude=/usr/share/man/*'
-            '--exclude=/usr/share/locale/*' '--exclude=/usr/share/help/*'
-            '--exclude=/usr/share/fonts/truetype/*' '--exclude=/usr/share/pixmaps/*'
-            '--exclude=/usr/share/icons/*' '--exclude=/usr/share/sounds/*'
-            '--exclude=/usr/lib/libreoffice/*' '--exclude=/snap/*'
-        )
-        log INFO "Using minimal copy mode for ${INSTALL_TYPE} install"
-    fi
-    
-    # Estimate copy size and time
-    log INFO "Estimating copy size..."
-    local total_size=$(du -sb --exclude=/dev --exclude=/proc --exclude=/sys \
-                          --exclude=/tmp --exclude=/run --exclude=/mnt \
-                          --exclude=/media --exclude=/cdrom / 2>/dev/null | \
-                          awk '{print $1}' || echo "unknown")
-    
-    if [[ "$total_size" != "unknown" ]]; then
-        local size_gb=$((total_size / 1024 / 1024 / 1024))
-        log INFO "Copying approximately ${size_gb}GB of system files..."
-        log INFO "This may take 5-15 minutes depending on your storage speed"
-    fi
-    
-    # Copy with optimized settings and progress
-    log INFO "Starting optimized copy (progress shown below)..."
-    
-    # Use optimized rsync settings:
-    # -a: archive mode (preserves permissions, times, etc.)
-    # -H: preserve hard links
-    # -A: preserve ACLs
-    # -X: preserve extended attributes  
-    # -S: handle sparse files efficiently
-    # --info=progress2: show total progress
-    # --no-inc-recursive: faster for large transfers
-    # --whole-file: don't use delta transfer (faster for local copies)
-    rsync -aHAXS --info=progress2 --no-inc-recursive --whole-file \
-          "${exclude_patterns[@]}" \
-          / /mnt/ || die "Failed to copy live system"
-    
-    # Clean up some live-specific files that shouldn't be in the installed system
-    log INFO "Cleaning up live system artifacts..."
-    rm -rf /mnt/var/lib/live /mnt/var/crash/* /mnt/var/log/* 2>/dev/null || true
-    
-    # Create fresh log directory
-    mkdir -p /mnt/var/log
-    chmod 755 /mnt/var/log
-    
-    log SUCCESS "Live system copied and cleaned up"
-}
 
-install_missing_packages() {
-    local codename="$1" 
-    local mirror="$2"
-    
-    # Only needed if we used live system copy
-    if ! is_live_environment; then
-        return  # debootstrap already installed everything
-    fi
-    
-    log INFO "Installing ZFS packages not included in live system..."
-    
-    # Essential ZFS packages that might not be on Live USB
-    local zfs_packages=("zfsutils-linux" "zfs-initramfs" "zfs-dkms")
-    
-    # Update package cache in target
-    chroot /mnt apt-get update || log WARNING "Failed to update package cache in target"
-    
-    # Install missing packages
-    for package in "${zfs_packages[@]}"; do
-        if ! chroot /mnt dpkg -l "$package" &>/dev/null; then
-            log INFO "Installing missing package: $package"
-            chroot /mnt apt-get install -y "$package" || log WARNING "Failed to install $package"
-        else
-            log INFO "Package $package already installed"
-        fi
-    done
-}
 
-debug_live_detection() {
-    log INFO "Debugging live environment detection..."
-    
-    # Check paths
-    local live_paths=(
-        "/usr/lib/live/mount/medium/casper/filesystem.squashfs"
-        "/cdrom/casper/filesystem.squashfs" 
-        "/media/*/casper/filesystem.squashfs"
-        "/run/live/medium/casper/filesystem.squashfs"
-    )
-    
-    for path in "${live_paths[@]}"; do
-        if [[ -f $path ]]; then
-            log INFO "✓ Found: $path"
-        else
-            log INFO "✗ Not found: $path"
-        fi
-    done
-    
-    # Check cmdline
-    local cmdline=$(cat /proc/cmdline 2>/dev/null || echo "")
-    log INFO "Kernel cmdline: $cmdline"
-    
-    # Check processes
-    local casper_procs=$(pgrep -f casper 2>/dev/null || echo "")
-    log INFO "Casper processes: ${casper_procs:-none}"
-    
-    # Check users  
-    if id ubuntu >/dev/null 2>&1; then
-        log INFO "✓ Ubuntu user exists"
-    else
-        log INFO "✗ Ubuntu user not found"
-    fi
-    
-    # Check mounted filesystems
-    log INFO "Mounted filesystems with 'live' or 'casper':"
-    mount | grep -E "(live|casper)" || log INFO "  None found"
-}
 
 is_live_environment() {
-    # Debug mode for troubleshooting
-    if [[ "${DEBUG:-false}" == "true" ]]; then
-        debug_live_detection
-    fi
     
     # Multiple ways to detect live environment
     local live_paths=(
@@ -948,28 +818,86 @@ is_live_environment() {
 
 run_debootstrap() {
     local codename="$1"
-    local mirror="$2" 
+    local network_mirror="$2" 
     local all_packages="$3"
+    local target_arch=$(detect_architecture)
     
-    # Check if we should use the faster live system copy method
+    local mirror_url="$network_mirror"  # default to network mirror
+    local used_local_repo=false
+    
+    # If we are in a live environment, try to use its repository as a local mirror
     if is_live_environment; then
-        log INFO "Using optimized live system copy instead of debootstrap"
-        copy_live_system
-        return
+        log INFO "Live environment detected - checking for local repository..."
+        
+        local live_repo_paths=(
+            "/run/live/medium"
+            "/cdrom"
+            "/usr/lib/live/mount/medium"
+        )
+        
+        for path in "${live_repo_paths[@]}"; do
+            if [[ -d "$path/dists/$codename" ]]; then
+                mirror_url="file://$path"
+                used_local_repo=true
+                log INFO "Using local repository for speed: $path"
+                break
+            fi
+        done
+        
+        if [[ "$used_local_repo" == "false" ]]; then
+            log WARNING "Live environment detected, but no local repository found."
+            # Get the best available mirror as fallback
+            log INFO "Detecting best network mirror as fallback..."
+            local best_mirror=$(detect_best_mirror "$codename")
+            if [[ -n "$best_mirror" ]]; then
+                mirror_url="$best_mirror"
+                log INFO "Using optimized network mirror: $best_mirror"
+            else
+                log WARNING "Could not detect optimal mirror, using default: $network_mirror"
+            fi
+        fi
+    else
+        # Not in live environment - get best network mirror
+        log INFO "Detecting best network mirror for installation..."
+        local best_mirror=$(detect_best_mirror "$codename")
+        if [[ -n "$best_mirror" ]]; then
+            mirror_url="$best_mirror"
+            log INFO "Using optimized network mirror: $best_mirror"
+        fi
     fi
     
-    # Fallback to traditional debootstrap for non-live environments
-    local target_arch=$(detect_architecture)
-    log INFO "No live environment detected, using debootstrap for $target_arch"
+    log INFO "Starting debootstrap for $target_arch from $mirror_url"
     log INFO "Packages to install: ${all_packages}"
     
-    debootstrap \
+    # Try debootstrap with error handling and fallback
+    if ! debootstrap \
         --arch="${target_arch}" \
         --include="${all_packages}" \
         --components=main,restricted,universe,multiverse \
         "${codename}" \
         /mnt \
-        "${mirror}" || die "Failed to run debootstrap"
+        "${mirror_url}"; then
+        
+        # If local repo failed, try with best network mirror
+        if [[ "$used_local_repo" == "true" ]]; then
+            log WARNING "Local repository failed, falling back to network mirror..."
+            local fallback_mirror=$(detect_best_mirror "$codename")
+            if [[ -z "$fallback_mirror" ]]; then
+                fallback_mirror="$network_mirror"
+            fi
+            
+            log INFO "Retrying debootstrap with network mirror: $fallback_mirror"
+            debootstrap \
+                --arch="${target_arch}" \
+                --include="${all_packages}" \
+                --components=main,restricted,universe,multiverse \
+                "${codename}" \
+                /mnt \
+                "${fallback_mirror}" || die "Failed to run debootstrap with both local and network mirrors"
+        else
+            die "Failed to run debootstrap"
+        fi
+    fi
 }
 
 detect_live_mirror() {
@@ -1112,7 +1040,7 @@ detect_best_mirror() {
     # and may not be accurate if using a VPN or proxy
     local country_code=""
     if command -v curl &> /dev/null; then
-        country_code=$(curl -s --connect-timeout 3 --max-time 5 http://ipinfo.io/country 2>/dev/null || true)
+        country_code=$(curl -s --connect-timeout 3 --max-time 5 https://ipinfo.io/country 2>/dev/null || true)
     fi
     
     local geo_mirror=$(get_architecture_base_url "$country_code")
@@ -1151,12 +1079,14 @@ install_base_system() {
     local base_packages="linux-image-generic,linux-headers-generic,efibootmgr,systemd"
     
     # Additional packages based on install type
+    # Note: Using ubuntu-standard instead of ubuntu-server to avoid GRUB conflicts
     case "${INSTALL_TYPE}" in
         desktop)
-            base_packages="${base_packages},ubuntu-desktop-minimal,network-manager"
+            # Install standard base first, desktop environment comes later in finalize
+            base_packages="${base_packages},ubuntu-standard,network-manager,openssh-server,curl,wget"
             ;;
         server)
-            base_packages="${base_packages},ubuntu-server,openssh-server,curl,wget"
+            base_packages="${base_packages},ubuntu-standard,openssh-server,curl,wget,screen,htop"
             ;;
         minimal)
             base_packages="${base_packages},openssh-server,curl,wget,vim"
@@ -1170,9 +1100,6 @@ install_base_system() {
     run_debootstrap "$codename" "$mirror" "$all_packages"
     configure_apt_sources "$codename" "$mirror"
     mount_chroot_filesystems
-    
-    # Install missing ZFS packages if we used live system copy
-    install_missing_packages "$codename" "$mirror"
     
     save_state "BASE_INSTALLED" "true"
 }
@@ -1232,13 +1159,25 @@ set -e
 # Update package cache
 apt-get update
 
-# Install dependencies
-apt-get install -y python3 python3-pip python3-setuptools git build-essential
+# Install dependencies including ca-certificates for secure git clone
+apt-get install -y ca-certificates python3 python3-pip python3-setuptools git build-essential
 
-# Install zectl
+# Install zectl with retry logic for network reliability
 cd /tmp
 if [[ -d zectl ]]; then rm -rf zectl; fi
-git clone https://github.com/johnramsden/zectl.git
+
+# Retry git clone up to 3 times
+for attempt in {1..3}; do
+    if git clone https://github.com/johnramsden/zectl.git; then
+        break
+    elif [[ $attempt -eq 3 ]]; then
+        echo "Failed to clone zectl repository after 3 attempts" >&2
+        exit 1
+    else
+        echo "Git clone attempt $attempt failed, retrying..." >&2
+        sleep 2
+    fi
+done
 cd zectl
 python3 setup.py install
 
@@ -1355,6 +1294,16 @@ if systemctl list-unit-files | grep -q NetworkManager; then
     systemctl enable NetworkManager
 fi
 
+# Install desktop environment if selected
+if [[ "${INSTALL_TYPE}" == "desktop" ]]; then
+    echo "Installing desktop environment. This may take some time..."
+    # Update package cache first
+    apt-get update -y
+    # Use apt's full dependency resolver to handle the desktop metapackage
+    apt-get install -y ubuntu-desktop-minimal localsearch
+    echo "Desktop environment installed successfully"
+fi
+
 # Note: No forced password change since user set password during installation
 
 # Ensure CA certificates are updated
@@ -1454,8 +1403,8 @@ SCRIPT
     fi
 
     # Set variables in chroot environment
-    export USERNAME USER_PASSWORD ROOT_PASSWORD
-    chroot /mnt /bin/bash -c "USERNAME='${USERNAME}' USER_PASSWORD='${USER_PASSWORD}' ROOT_PASSWORD='${ROOT_PASSWORD}' /tmp/finalize.sh" || die "Failed to finalize installation"
+    export USERNAME USER_PASSWORD ROOT_PASSWORD INSTALL_TYPE
+    chroot /mnt /bin/bash -c "USERNAME='${USERNAME}' USER_PASSWORD='${USER_PASSWORD}' ROOT_PASSWORD='${ROOT_PASSWORD}' INSTALL_TYPE='${INSTALL_TYPE}' /tmp/finalize.sh" || die "Failed to finalize installation"
     
     # Clean up
     rm -f /mnt/tmp/*.sh

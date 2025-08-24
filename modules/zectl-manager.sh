@@ -15,9 +15,13 @@
 set -euo pipefail
 
 # Boot environment configuration
-readonly BE_ROOT_DATASET="${POOL_NAME}/ROOT"
 readonly BE_SNAPSHOT_PREFIX="auto"
 readonly BE_MAX_SNAPSHOTS=10
+
+# Dynamic BE root dataset based on current pool name
+get_be_root_dataset() {
+    echo "${POOL_NAME:-rpool}/ROOT"
+}
 
 #############################################################
 # Boot Environment Functions
@@ -113,7 +117,7 @@ snapshot_boot_environment() {
     
     if [[ -z "${be_name}" ]]; then
         # Snapshot current BE
-        be_name=$(zectl list -H | grep -E '^\s*N\s+R' | awk '{print $1}')
+        be_name=$(zectl list -p | grep -E '^NR' | cut -d$'\t' -f1)
     fi
     
     if [[ -z "${snapshot_name}" ]]; then
@@ -228,7 +232,7 @@ title   Ubuntu - ${be_name}
 version ${creation}
 linux   /vmlinuz-${kernel_version}
 initrd  /initrd.img-${kernel_version}
-options root=ZFS=${BE_ROOT_DATASET}/${be_name} rw quiet splash
+options root=ZFS=$(get_be_root_dataset)/${be_name} rw quiet splash
 EOF
         
         # Set default if active
@@ -285,7 +289,7 @@ MAX_SNAPSHOTS=10
 SNAPSHOT_PREFIX="auto"
 
 # Get current boot environment
-CURRENT_BE=$(zectl list -H | grep -E '^\s*N\s+R' | awk '{print $1}')
+CURRENT_BE=$(zectl list -p | grep -E '^NR' | cut -d$'\t' -f1)
 
 if [[ -n "${CURRENT_BE}" ]]; then
     # Create snapshot
@@ -355,7 +359,7 @@ ACTION="${1:-pre}"
 SNAPSHOT_PREFIX="apt"
 
 # Get current boot environment
-CURRENT_BE=$(zectl list -H | grep -E '^\s*N\s+R' | awk '{print $1}')
+CURRENT_BE=$(zectl list -p | grep -E '^NR' | cut -d$'\t' -f1)
 
 if [[ -n "${CURRENT_BE}" ]]; then
     case "${ACTION}" in
