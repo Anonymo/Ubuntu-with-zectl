@@ -85,14 +85,14 @@ ensure_network() {
 setup_ssh() {
     echo -e "${BLUE}Setting up SSH server...${NC}"
     
-    # Install OpenSSH server (packages are on the live media)
-    echo -e "${YELLOW}Installing OpenSSH server...${NC}"
-    apt-get install -y openssh-server || {
-        echo -e "${RED}Failed to install OpenSSH server${NC}"
+    # Install SSH server (packages are on the live media)
+    echo -e "${YELLOW}Installing SSH server...${NC}"
+    apt-get install -y ssh || {
+        echo -e "${RED}Failed to install SSH server${NC}"
         echo -e "If this fails, you may need to run: apt-get update"
         exit 1
     }
-    echo -e "${GREEN}✓${NC} OpenSSH server installed"
+    echo -e "${GREEN}✓${NC} SSH server installed"
     
     # Configure SSH
     echo -e "${BLUE}Configuring SSH...${NC}"
