@@ -113,6 +113,30 @@ check_root() {
     fi
 }
 
+detect_ssh_session() {
+    # Detect if we're running over SSH for better user experience
+    if [[ -n "${SSH_CONNECTION:-}" ]] || [[ -n "${SSH_CLIENT:-}" ]] || [[ -n "${SSH_TTY:-}" ]]; then
+        log INFO "SSH session detected - enabling remote-friendly features"
+        export IS_SSH_SESSION="true"
+        
+        # Show connection info for reference
+        if [[ -n "${SSH_CONNECTION:-}" ]]; then
+            local client_ip=$(echo "$SSH_CONNECTION" | awk '{print $1}')
+            log INFO "Connected from: $client_ip"
+        fi
+        
+        # Ensure we don't lose connection during critical operations
+        if command -v tmux &>/dev/null; then
+            if [[ -z "${TMUX:-}" ]]; then
+                log WARNING "Consider running installer inside tmux/screen to prevent disconnection issues"
+                log WARNING "Run: tmux new -s installer"
+            fi
+        fi
+    else
+        export IS_SSH_SESSION="false"
+    fi
+}
+
 check_uefi() {
     log INFO "Checking UEFI system requirements..."
     
@@ -1506,6 +1530,7 @@ main() {
     
     # Check prerequisites
     check_root
+    detect_ssh_session
     check_uefi
     check_dependencies
     detect_ubuntu_version

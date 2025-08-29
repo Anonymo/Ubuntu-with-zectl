@@ -12,39 +12,57 @@ This installer gives you:
 
 ## Quick Install
 
-Boot from Ubuntu Live USB, then:
+### Method 1: SSH Remote Installation (Recommended)
+
+This method allows you to install from another computer, making it easier to troubleshoot and see any errors:
+
+**On the target machine (booted from Ubuntu Live USB):**
+```bash
+# Download and run SSH enabler
+wget -O- https://raw.githubusercontent.com/Anonymo/Ubuntu-with-zectl/main/enable-ssh.sh | sudo bash
+
+# Or if wget isn't available:
+curl -fsSL https://raw.githubusercontent.com/Anonymo/Ubuntu-with-zectl/main/enable-ssh.sh | sudo bash
+```
+
+The script will:
+- Enable SSH access
+- Show you the IP address to connect to
+- Set up passwords for remote access
+- Download the installer automatically
+
+**From your main computer:**
+```bash
+# Connect to the target machine (use IP shown by enable-ssh.sh)
+ssh root@<TARGET_IP>
+
+# Navigate to installer
+cd /root/Ubuntu-with-zectl
+
+# Run the installer
+./install.sh
+```
+
+**Pro tip:** Run inside tmux to prevent disconnection issues:
+```bash
+tmux new -s installer
+./install.sh
+# If disconnected, reconnect with: tmux attach -t installer
+```
+
+### Method 2: Direct Installation
+
+Boot from Ubuntu Live USB and run directly on the target machine:
 
 **One-liner install:**
 ```bash
 wget -O install.sh https://raw.githubusercontent.com/Anonymo/Ubuntu-with-zectl/main/install.sh && chmod +x install.sh && sudo ./install.sh
 ```
 
-**Or step-by-step:**
+**Or clone for full options:**
 ```bash
-# Install prerequisites (if not already available)
-sudo apt update
-sudo apt install -y wget curl git
-
-# Download and run
-wget https://raw.githubusercontent.com/Anonymo/Ubuntu-with-zectl/main/install.sh
-chmod +x install.sh
-sudo ./install.sh
-```
-
-**Alternative: Clone the repository for full configuration options:**
-
-```bash
-# Install git if needed
-sudo apt update && sudo apt install -y git
-
-# Clone repository
 git clone https://github.com/Anonymo/Ubuntu-with-zectl.git
 cd Ubuntu-with-zectl
-
-# Edit configuration (optional)
-nano installer.conf
-
-# Run installer
 sudo ./install.sh
 ```
 
