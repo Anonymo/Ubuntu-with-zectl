@@ -82,9 +82,128 @@ log() {
     esac
 }
 
+# Error codes for better debugging
+declare -A ERROR_CODES=(
+    # System Requirements (10-19)
+    [E001]="Not running as root"
+    [E002]="Not a UEFI system"
+    [E003]="EFI variables not accessible"
+    [E004]="Missing required dependency"
+    [E005]="Ubuntu version not supported"
+    
+    # Disk Operations (20-29)
+    [E020]="Failed to prepare disk"
+    [E021]="Failed to partition disk"
+    [E022]="Failed to format ESP partition"
+    [E023]="Disk is too small"
+    [E024]="Disk device not found"
+    [E025]="Failed to wipe disk"
+    [E026]="Partition creation failed"
+    
+    # ZFS Operations (30-39)
+    [E030]="Failed to create ZFS pool"
+    [E031]="Failed to create ZFS dataset"
+    [E032]="Failed to mount ZFS dataset"
+    [E033]="ZFS module not loaded"
+    [E034]="Pool import failed"
+    [E035]="Dataset creation failed"
+    [E036]="ZFS property setting failed"
+    
+    # Installation (40-49)
+    [E040]="Debootstrap failed"
+    [E041]="Failed to install base system"
+    [E042]="Package installation failed"
+    [E043]="Network unreachable"
+    [E044]="Mirror validation failed"
+    [E045]="Local repository not found"
+    [E046]="APT update failed"
+    
+    # Configuration (50-59)
+    [E050]="Failed to configure system"
+    [E051]="Locale generation failed"
+    [E052]="Timezone configuration failed"
+    [E053]="Network configuration failed"
+    [E054]="User creation failed"
+    [E055]="Password setting failed"
+    
+    # Boot Management (60-69)
+    [E060]="systemd-boot installation failed"
+    [E061]="Boot entry creation failed"
+    [E062]="ESP mount failed"
+    [E063]="Kernel copy failed"
+    [E064]="Initramfs generation failed"
+    [E065]="Boot configuration failed"
+    
+    # zectl/BE Management (70-79)
+    [E070]="zectl installation failed"
+    [E071]="zectl not functional after installation"
+    [E072]="Boot environment creation failed"
+    [E073]="Git clone failed"
+    [E074]="Python setup failed"
+    [E075]="zectl command not found"
+    
+    # Finalization (80-89)
+    [E080]="Finalization failed"
+    [E081]="Cleanup failed"
+    [E082]="Unmount failed"
+    [E083]="Pool export failed"
+    [E084]="State save failed"
+    
+    # User Errors (90-99)
+    [E090]="User cancelled installation"
+    [E091]="Invalid configuration"
+    [E092]="Configuration file not found"
+    [E093]="Invalid disk selection"
+    [E094]="Installation media selected as target"
+)
+
+# Global variable to store error context
+ERROR_CONTEXT=""
+
 die() {
-    log ERROR "$@"
-    exit 1
+    local error_code="${1:-E999}"
+    local custom_message="${2:-}"
+    
+    # Get the error description
+    local error_desc="${ERROR_CODES[$error_code]:-Unknown error}"
+    
+    # Build error message
+    local error_msg="[$error_code] $error_desc"
+    if [[ -n "$custom_message" ]]; then
+        error_msg="$error_msg - $custom_message"
+    fi
+    
+    # Log the error
+    log ERROR "$error_msg"
+    
+    # Show error context if available
+    if [[ -n "$ERROR_CONTEXT" ]]; then
+        log ERROR "Context: $ERROR_CONTEXT"
+    fi
+    
+    # Show debugging information
+    echo -e "\n${RED}════════════════════════════════════════════════════════${NC}"
+    echo -e "${RED}  INSTALLATION FAILED${NC}"
+    echo -e "${RED}════════════════════════════════════════════════════════${NC}"
+    echo -e "${YELLOW}Error Code:${NC} $error_code"
+    echo -e "${YELLOW}Description:${NC} $error_desc"
+    if [[ -n "$custom_message" ]]; then
+        echo -e "${YELLOW}Details:${NC} $custom_message"
+    fi
+    if [[ -n "$ERROR_CONTEXT" ]]; then
+        echo -e "${YELLOW}Context:${NC} $ERROR_CONTEXT"
+    fi
+    echo -e "${YELLOW}Log File:${NC} $LOG_FILE"
+    echo -e "${RED}════════════════════════════════════════════════════════${NC}"
+    echo -e "\n${CYAN}To report this error, please share:${NC}"
+    echo -e "  1. The error code: ${YELLOW}$error_code${NC}"
+    echo -e "  2. The last 50 lines of the log:"
+    echo -e "     ${GREEN}tail -50 $LOG_FILE${NC}"
+    echo -e "  3. System information:"
+    echo -e "     ${GREEN}lsblk && uname -a${NC}"
+    echo -e "${RED}════════════════════════════════════════════════════════${NC}\n"
+    
+    exit "${error_code:1}"  # Exit with numeric part of error code
 }
 
 confirm() {
@@ -109,7 +228,7 @@ confirm() {
 
 check_root() {
     if [[ $EUID -ne 0 ]]; then
-        die "This script must be run as root"
+        die "E001" "Run with: sudo $0"
     fi
 }
 
@@ -142,12 +261,12 @@ check_uefi() {
     
     # Check if system is booted in UEFI mode
     if [[ ! -d /sys/firmware/efi ]]; then
-        die "This installer requires a UEFI system. Boot your system in UEFI mode to continue."
+        die "E002" "Boot your system in UEFI mode to continue"
     fi
     
     # Check for EFI variables support
     if [[ ! -d /sys/firmware/efi/efivars ]]; then
-        log WARNING "EFI variables not accessible. Some boot management features may not work."
+        log WARNING "[E003] EFI variables not accessible. Some boot management features may not work."
     fi
     
     log INFO "UEFI system detected"
@@ -646,17 +765,18 @@ create_zfs_pool() {
     log INFO "Creating ZFS pool on ${zfs_partition}..."
     
     # Create pool (encryption handled via keyfile if enabled)
-    zpool create -f "${pool_opts[@]}" "${POOL_NAME}" "${zfs_partition}" || die "Failed to create ZFS pool"
+    ERROR_CONTEXT="Pool: ${POOL_NAME}, Disk: ${zfs_partition}"
+    zpool create -f "${pool_opts[@]}" "${POOL_NAME}" "${zfs_partition}" || die "E030" "zpool create failed"
     
     # Create datasets
     log INFO "Creating ZFS datasets..."
     
     # Root dataset
-    zfs create -o canmount=off -o mountpoint=none "${POOL_NAME}/ROOT" || die "Failed to create ROOT dataset"
-    zfs create -o canmount=noauto -o mountpoint=/ "${POOL_NAME}/ROOT/ubuntu" || die "Failed to create ubuntu dataset"
+    zfs create -o canmount=off -o mountpoint=none "${POOL_NAME}/ROOT" || die "E031" "Failed to create ROOT dataset"
+    zfs create -o canmount=noauto -o mountpoint=/ "${POOL_NAME}/ROOT/ubuntu" || die "E035" "Failed to create ubuntu dataset"
     
     # Mark as boot environment
-    zpool set bootfs="${POOL_NAME}/ROOT/ubuntu" "${POOL_NAME}" || die "Failed to set bootfs"
+    zpool set bootfs="${POOL_NAME}/ROOT/ubuntu" "${POOL_NAME}" || die "E036" "Failed to set bootfs property"
     
     # Home dataset (separate for snapshots)
     zfs create -o canmount=on -o mountpoint=/home "${POOL_NAME}/home" || die "Failed to create home dataset"
@@ -669,11 +789,11 @@ create_zfs_pool() {
     zfs create -o canmount=on "${POOL_NAME}/var/tmp" || die "Failed to create var/tmp dataset"
     
     # Mount root
-    zfs mount "${POOL_NAME}/ROOT/ubuntu" || die "Failed to mount root dataset"
+    zfs mount "${POOL_NAME}/ROOT/ubuntu" || die "E032" "Failed to mount root dataset"
     
     # Create mount points
     mkdir -p /mnt/boot/efi || die "Failed to create boot/efi directory"
-    mount "${EFI_PARTITION}" /mnt/boot/efi || die "Failed to mount EFI partition"
+    mount "${EFI_PARTITION}" /mnt/boot/efi || die "E062" "Failed to mount ESP at /mnt/boot/efi"
     
     # Ensure ZFS cachefile is present in target for reliable imports at boot
     mkdir -p /etc/zfs /mnt/etc/zfs
@@ -1239,7 +1359,7 @@ install_systemd_boot() {
     log INFO "Installing systemd-boot..."
     
     # Install systemd-boot to ESP
-    chroot /mnt bootctl --path=/boot/efi install || die "Failed to install systemd-boot"
+    chroot /mnt bootctl --path=/boot/efi install || die "E060" "bootctl install failed"
     
     # Configure loader
     cat > /mnt/boot/efi/loader/loader.conf <<EOF
