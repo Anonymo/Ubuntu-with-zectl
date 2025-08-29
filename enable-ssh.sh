@@ -85,23 +85,22 @@ ensure_network() {
 setup_ssh() {
     echo -e "${BLUE}Setting up SSH server...${NC}"
     
-    # Update package cache if needed
-    if [[ ! -f /var/lib/apt/lists/lock ]]; then
-        echo -e "${YELLOW}Updating package cache...${NC}"
-        apt-get update -qq || true
-    fi
+    # Always update package cache for live environment
+    echo -e "${YELLOW}Updating package cache...${NC}"
+    apt-get update || {
+        echo -e "${RED}Failed to update package cache${NC}"
+        echo -e "Check your internet connection"
+        exit 1
+    }
     
-    # Install OpenSSH server
-    if ! command -v sshd &> /dev/null; then
-        echo -e "${YELLOW}Installing OpenSSH server...${NC}"
-        apt-get install -y -qq openssh-server || {
-            echo -e "${RED}Failed to install OpenSSH server${NC}"
-            echo -e "You may need to configure apt sources or network first"
-            exit 1
-        }
-    else
-        echo -e "${GREEN}✓${NC} OpenSSH server is already installed"
-    fi
+    # Always install/reinstall OpenSSH server to ensure it's present
+    echo -e "${YELLOW}Installing OpenSSH server...${NC}"
+    apt-get install -y openssh-server || {
+        echo -e "${RED}Failed to install OpenSSH server${NC}"
+        echo -e "You may need to configure network first"
+        exit 1
+    }
+    echo -e "${GREEN}✓${NC} OpenSSH server installed"
     
     # Configure SSH
     echo -e "${BLUE}Configuring SSH...${NC}"
@@ -132,11 +131,14 @@ EOF
 setup_user_access() {
     echo -e "${BLUE}Setting up user access...${NC}"
     
+    # Set a default password for easier setup (user can change later)
+    local DEFAULT_PASS="ubuntu"
+    
     # Check if ubuntu user exists (common in live environments)
     if id ubuntu &>/dev/null; then
-        echo -e "${YELLOW}Setting password for 'ubuntu' user...${NC}"
-        echo -e "${CYAN}Enter password for 'ubuntu' user:${NC}"
-        if passwd ubuntu; then
+        echo -e "${YELLOW}Setting password for 'ubuntu' user to: ${GREEN}${DEFAULT_PASS}${NC}"
+        echo "ubuntu:${DEFAULT_PASS}" | chpasswd
+        if [ $? -eq 0 ]; then
             echo -e "${GREEN}✓${NC} Password set for 'ubuntu' user"
         else
             echo -e "${RED}Failed to set password for 'ubuntu' user${NC}"
@@ -144,16 +146,25 @@ setup_user_access() {
         
         # Add ubuntu to sudo group if not already
         usermod -aG sudo ubuntu 2>/dev/null || true
+    else
+        echo -e "${YELLOW}Ubuntu user doesn't exist, creating it...${NC}"
+        useradd -m -s /bin/bash ubuntu
+        echo "ubuntu:${DEFAULT_PASS}" | chpasswd
+        usermod -aG sudo ubuntu
+        echo -e "${GREEN}✓${NC} Created 'ubuntu' user with password: ${GREEN}${DEFAULT_PASS}${NC}"
     fi
     
-    # Enable root access
-    echo -e "\n${YELLOW}Setting password for 'root' user...${NC}"
-    echo -e "${CYAN}Enter password for 'root' user:${NC}"
-    if passwd root; then
+    # Enable root access with same default password
+    echo -e "${YELLOW}Setting password for 'root' user to: ${GREEN}${DEFAULT_PASS}${NC}"
+    echo "root:${DEFAULT_PASS}" | chpasswd
+    if [ $? -eq 0 ]; then
         echo -e "${GREEN}✓${NC} Password set for 'root' user"
     else
         echo -e "${RED}Failed to set password for 'root' user${NC}"
     fi
+    
+    echo -e "\n${YELLOW}⚠ DEFAULT PASSWORDS SET TO: ${GREEN}${DEFAULT_PASS}${NC}"
+    echo -e "${YELLOW}⚠ Change these passwords after logging in for security!${NC}"
 }
 
 # Start SSH service
@@ -240,15 +251,20 @@ show_connection_info() {
         echo -e "${CYAN}Connect from your main machine using:${NC}"
         echo -e "${YELLOW}--------------------------------------${NC}"
         
-        # Show connection commands
+        # Show connection commands with password
+        echo -e "${MAGENTA}Default password for all users: ${GREEN}ubuntu${NC}"
+        echo
+        
         if id ubuntu &>/dev/null 2>&1; then
             echo -e "As ubuntu user:"
             echo -e "  ${GREEN}ssh ubuntu@$primary_ip${NC}"
+            echo -e "  Password: ${GREEN}ubuntu${NC}"
             echo
         fi
         
         echo -e "As root user:"
         echo -e "  ${GREEN}ssh root@$primary_ip${NC}"
+        echo -e "  Password: ${GREEN}ubuntu${NC}"
         echo
         
         echo -e "${CYAN}After connecting, run the installer:${NC}"
