@@ -85,19 +85,11 @@ ensure_network() {
 setup_ssh() {
     echo -e "${BLUE}Setting up SSH server...${NC}"
     
-    # Always update package cache for live environment
-    echo -e "${YELLOW}Updating package cache...${NC}"
-    apt-get update || {
-        echo -e "${RED}Failed to update package cache${NC}"
-        echo -e "Check your internet connection"
-        exit 1
-    }
-    
-    # Always install/reinstall OpenSSH server to ensure it's present
+    # Install OpenSSH server (packages are on the live media)
     echo -e "${YELLOW}Installing OpenSSH server...${NC}"
     apt-get install -y openssh-server || {
         echo -e "${RED}Failed to install OpenSSH server${NC}"
-        echo -e "You may need to configure network first"
+        echo -e "If this fails, you may need to run: apt-get update"
         exit 1
     }
     echo -e "${GREEN}✓${NC} OpenSSH server installed"
